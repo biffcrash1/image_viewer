@@ -1,0 +1,60 @@
+Build a python GUI application that can view any image file
+
+The application will have the following features.
+ - Directory browsing
+ - sqlite database support for cataloging image files
+
+
+Feature details
+1.) Two main tabs, selectable by tabs at the top of the screen.
+    a.) Browse - This allows the user to browse the directory structure.
+        - Two columns
+        - Right side of window contains directory structure
+            - User can navigate the directory structure similar to windows explorer
+            - Directories can be expanded and collapsed by clicking the directory icon
+            - Single clicking an image file will display it in a preview window.
+            - Double clicking an image file will open it full screen.
+            - Right clicking an image file will bring up a dialog box to add tags to the image's entry in the database.
+                - if a database is not presently open, the add tag option will be greyed out.
+                - in the add tag dialog, all tags found in the presently open database will appear in a scrollable list with checkboxes.
+                - in the add tag dialog, the user can check boxed for existing tags, and also add their own in a text entry box.  new tags are separated by commas in the text entry box.
+        - Left side of window contains a preview of the image selected
+
+    b.) Database - This allows the user to view the items in the presently open database. Tags are used as filters
+        - Two columns 
+        - Right side of window contains two boxes
+          - The upper box contains a scrollable list of all tags found in the presently open database.
+            - Each tag has two checkboxes each in its own column.
+            - Yes - include files with this tag in the filters
+            - No - do not include files with this tag in the filter.
+          - The lower box
+        - Left side of the window contains a preview of the image selected
+        - Single clicking an image file will display it in a preview window.
+        - Double clicking an image file will open it full screen.
+        - Right clicking an image file will bring up a dialog box to add tags to the image's entry in the database.
+            - This add tag dialog is the same and works the same as that in the Browse tab.
+        - Left side of window contains a preview of the image selected
+2.) Full screen mode
+    a.) Full screen mode can be entered from either Browse or Database tabs by double clicking on an image file.
+    a.) While in full screen mode, the mouse wheel will sequence through the images in the directory being viewed.
+    b.) While in full screen mode, double clicking on the image will close full screen mode and return to the either the Browse or Database view, whichever was active before entering Full Screen mode.
+    c.) While in full screen mode, right clicking the image will bring up a dialog box to add tags to the image's entry in the database.
+        - This add tag dialog is the same and works the same as that in the Browse tab.
+3.) There is a "Database" drop down menu that contains the following options:
+    a.) Create database
+        - This option prompts the user for a directory, then creates an sqlite database in that directory of all image files contained in that directory, recursively.
+        - User is prompted for the name of the new database.
+        - The database contains at a minimum for each file, the file name, relative path, resolution of image, 1-10 rating scale, and any number of tags
+        - The database file resides in the directory for which it was created.
+        - The database will be opened after being created.
+    b.) Open database
+        - This option prompts the user to browse to a database file to open.
+        - When the database is opened, the view changes to the Database tab.
+    c.) Rescan
+        - This option re-scans the directory containting the database recurssively.
+        - It updates the database adding any new files that are found
+        - It updates the database removing any existing files from the database which are longer present in the directory.
+    d.) Any time a database is created, opened or rescanned, the list of both filtered files and visible tags is refreshed.
+
+
+

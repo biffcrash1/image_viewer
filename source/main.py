@@ -1,0 +1,914 @@
+#!/usr/bin/env python3
+"""
+Image Viewer Application
+A Python GUI application for viewing and cataloging image files with SQLite database support.
+"""
+
+import tkinter as tk
+from tkinter import ttk, filedialog, messagebox, simpledialog
+import sqlite3
+import os
+from PIL import Image, ImageTk
+import threading
+from pathlib import Path
+
+class ImageViewer:
+    def __init__( self, root ):
+        self.root = root
+        self.root.title( "Image Viewer" )
+        self.root.geometry( "1200x800" )
+        
+        # Application state
+        self.current_database = None
+        self.current_database_path = None
+        self.current_image = None
+        self.current_directory = None
+        self.fullscreen_window = None
+        self.fullscreen_images = []
+        self.fullscreen_index = 0
+        self.previous_tab = None
+        
+        # Supported image formats
+        self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
+        
+        self.setup_ui()
+        self.setup_database_menu()
+        
+    def setup_ui( self ):
+        """Initialize the main user interface"""
+        # Create notebook for tabs
+        self.notebook = ttk.Notebook( self.root )
+        self.notebook.pack( fill=tk.BOTH, expand=True )
+        
+        # Browse tab
+        self.browse_frame = ttk.Frame( self.notebook )
+        self.notebook.add( self.browse_frame, text="Browse" )
+        self.setup_browse_tab()
+        
+        # Database tab
+        self.database_frame = ttk.Frame( self.notebook )
+        self.notebook.add( self.database_frame, text="Database" )
+        self.setup_database_tab()
+        
+        # Bind tab change event
+        self.notebook.bind( "<<NotebookTabChanged>>", self.on_tab_changed )
+        
+    def setup_database_menu( self ):
+        """Setup the database dropdown menu"""
+        menubar = tk.Menu( self.root )
+        self.root.config( menu=menubar )
+        
+        database_menu = tk.Menu( menubar, tearoff=0 )
+        menubar.add_cascade( label="Database", menu=database_menu )
+        
+        database_menu.add_command( label="Create Database", command=self.create_database )
+        database_menu.add_command( label="Open Database", command=self.open_database )
+        database_menu.add_command( label="Rescan", command=self.rescan_database )
+        
+    def setup_browse_tab( self ):
+        """Setup the Browse tab interface"""
+        # Create paned window for two columns
+        paned = ttk.PanedWindow( self.browse_frame, orient=tk.HORIZONTAL )
+        paned.pack( fill=tk.BOTH, expand=True )
+        
+        # Left column - Image preview
+        left_frame = ttk.Frame( paned )
+        paned.add( left_frame, weight=1 )
+        
+        ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
+        self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
+        self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
+        
+        # Right column - Directory tree
+        right_frame = ttk.Frame( paned )
+        paned.add( right_frame, weight=1 )
+        
+        # Drive selection header
+        drive_frame = ttk.Frame( right_frame )
+        drive_frame.pack( fill=tk.X, pady=5 )
+        
+        ttk.Label( drive_frame, text="Drive:" ).pack( side=tk.LEFT, padx=(5, 2) )
+        
+        self.drive_var = tk.StringVar()
+        self.drive_combo = ttk.Combobox( drive_frame, textvariable=self.drive_var, state="readonly", width=10 )
+        self.drive_combo.pack( side=tk.LEFT, padx=2 )
+        self.drive_combo.bind( "<<ComboboxSelected>>", self.on_drive_changed )
+        
+        # Populate drives
+        self.populate_drives()
+        
+        ttk.Label( right_frame, text="Directory Structure" ).pack( pady=(10, 5) )
+        
+        # Directory tree with scrollbar
+        tree_frame = ttk.Frame( right_frame )
+        tree_frame.pack( fill=tk.BOTH, expand=True )
+        
+        self.browse_tree = ttk.Treeview( tree_frame )
+        tree_scrollbar = ttk.Scrollbar( tree_frame, orient=tk.VERTICAL, command=self.browse_tree.yview )
+        self.browse_tree.configure( yscrollcommand=tree_scrollbar.set )
+        
+        self.browse_tree.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        tree_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Bind tree events
+        self.browse_tree.bind( "<<TreeviewSelect>>", self.on_browse_tree_select )
+        self.browse_tree.bind( "<Double-1>", self.on_browse_tree_double_click )
+        self.browse_tree.bind( "<Button-3>", self.on_browse_tree_right_click )
+        
+        # Load initial directory
+        self.load_directory_tree()
+        
+    def setup_database_tab( self ):
+        """Setup the Database tab interface"""
+        # Create paned window for two columns
+        paned = ttk.PanedWindow( self.database_frame, orient=tk.HORIZONTAL )
+        paned.pack( fill=tk.BOTH, expand=True )
+        
+        # Left column - Image preview
+        left_frame = ttk.Frame( paned )
+        paned.add( left_frame, weight=1 )
+        
+        ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
+        self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
+        self.database_preview_label.pack( fill=tk.BOTH, expand=True )
+        
+        # Right column - Tag filters and image list
+        right_frame = ttk.Frame( paned )
+        paned.add( right_frame, weight=2 )
+        
+        # Tag filter section
+        tag_frame = ttk.LabelFrame( right_frame, text="Tag Filters" )
+        tag_frame.pack( fill=tk.X, padx=5, pady=5 )
+        
+        # Tag listbox with scrollbar
+        tag_list_frame = ttk.Frame( tag_frame )
+        tag_list_frame.pack( fill=tk.BOTH, expand=True )
+        
+        self.tag_listbox = tk.Listbox( tag_list_frame, height=8 )
+        tag_scrollbar = ttk.Scrollbar( tag_list_frame, orient=tk.VERTICAL, command=self.tag_listbox.yview )
+        self.tag_listbox.configure( yscrollcommand=tag_scrollbar.set )
+        
+        self.tag_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Filter buttons
+        filter_button_frame = ttk.Frame( tag_frame )
+        filter_button_frame.pack( fill=tk.X, pady=5 )
+        
+        ttk.Button( filter_button_frame, text="Include Selected", command=self.include_tags ).pack( side=tk.LEFT, padx=2 )
+        ttk.Button( filter_button_frame, text="Exclude Selected", command=self.exclude_tags ).pack( side=tk.LEFT, padx=2 )
+        ttk.Button( filter_button_frame, text="Clear Filters", command=self.clear_filters ).pack( side=tk.LEFT, padx=2 )
+        
+        # Image list section
+        image_frame = ttk.LabelFrame( right_frame, text="Filtered Images" )
+        image_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        
+        # Image listbox with scrollbar
+        image_list_frame = ttk.Frame( image_frame )
+        image_list_frame.pack( fill=tk.BOTH, expand=True )
+        
+        self.database_image_listbox = tk.Listbox( image_list_frame )
+        image_scrollbar = ttk.Scrollbar( image_list_frame, orient=tk.VERTICAL, command=self.database_image_listbox.yview )
+        self.database_image_listbox.configure( yscrollcommand=image_scrollbar.set )
+        
+        self.database_image_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        image_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Bind database image list events
+        self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
+        self.database_image_listbox.bind( "<Double-1>", self.on_database_image_double_click )
+        self.database_image_listbox.bind( "<Button-3>", self.on_database_image_right_click )
+        
+        # Initialize tag filters
+        self.included_tags = set()
+        self.excluded_tags = set()
+        
+    def populate_drives( self ):
+        """Populate the drive selection combobox with available drives"""
+        import string
+        drives = []
+        
+        # Check for available drives on Windows
+        for letter in string.ascii_uppercase:
+            drive = f"{letter}:\\"
+            if os.path.exists( drive ):
+                drives.append( drive )
+                
+        self.drive_combo['values'] = drives
+        
+        # Set default to C: if available, otherwise first available drive
+        if "C:\\" in drives:
+            self.drive_var.set( "C:\\" )
+        elif drives:
+            self.drive_var.set( drives[0] )
+            
+    def on_drive_changed( self, event=None ):
+        """Handle drive selection change"""
+        selected_drive = self.drive_var.get()
+        if selected_drive:
+            self.load_directory_tree( selected_drive )
+            
+    def load_directory_tree( self, start_path=None ):
+        """Load directory structure into the tree view"""
+        if start_path is None:
+            start_path = self.drive_var.get() if hasattr( self, 'drive_var' ) and self.drive_var.get() else "C:\\"
+            
+        self.browse_tree.delete( *self.browse_tree.get_children() )
+        
+        try:
+            self.populate_tree( "", start_path )
+        except PermissionError:
+            messagebox.showerror( "Error", f"Permission denied accessing {start_path}" )
+            
+    def populate_tree( self, parent, path ):
+        """Recursively populate the directory tree"""
+        try:
+            items = sorted( os.listdir( path ) )
+            for item in items:
+                if item.startswith( '.' ):
+                    continue
+                    
+                item_path = os.path.join( path, item )
+                
+                if os.path.isdir( item_path ):
+                    # Directory
+                    node = self.browse_tree.insert( parent, tk.END, text=item, values=[item_path], tags=["directory"] )
+                    # Add a dummy child to make it expandable
+                    self.browse_tree.insert( node, tk.END, text="Loading..." )
+                    self.browse_tree.bind( "<<TreeviewOpen>>", self.on_tree_expand )
+                elif self.is_image_file( item_path ):
+                    # Image file
+                    self.browse_tree.insert( parent, tk.END, text=item, values=[item_path], tags=["image"] )
+        except PermissionError:
+            pass
+            
+    def on_tree_expand( self, event ):
+        """Handle tree node expansion"""
+        item = self.browse_tree.focus()
+        children = self.browse_tree.get_children( item )
+        
+        if len( children ) == 1 and self.browse_tree.item( children[0] )['text'] == "Loading...":
+            # Remove dummy child and populate real children
+            self.browse_tree.delete( children[0] )
+            path = self.browse_tree.item( item )['values'][0]
+            self.populate_tree( item, path )
+            
+    def is_image_file( self, filepath ):
+        """Check if file is a supported image format"""
+        return Path( filepath ).suffix.lower() in self.supported_formats
+        
+    def on_browse_tree_select( self, event ):
+        """Handle selection in browse tree"""
+        selection = self.browse_tree.selection()
+        if selection:
+            item = selection[0]
+            filepath = self.browse_tree.item( item )['values'][0]
+            
+            if self.is_image_file( filepath ):
+                self.display_image_preview( filepath, self.browse_preview_label )
+                
+    def on_browse_tree_double_click( self, event ):
+        """Handle double click in browse tree"""
+        selection = self.browse_tree.selection()
+        if selection:
+            item = selection[0]
+            filepath = self.browse_tree.item( item )['values'][0]
+            
+            if self.is_image_file( filepath ):
+                self.enter_fullscreen_mode( filepath )
+                
+    def on_browse_tree_right_click( self, event ):
+        """Handle right click in browse tree"""
+        item = self.browse_tree.identify_row( event.y )
+        if item:
+            filepath = self.browse_tree.item( item )['values'][0]
+            if self.is_image_file( filepath ):
+                self.show_tag_dialog( filepath )
+                
+    def display_image_preview( self, filepath, label_widget ):
+        """Display image preview in the specified label widget"""
+        try:
+            image = Image.open( filepath )
+            
+            # Calculate preview size (max 400x400)
+            max_size = 400
+            image.thumbnail( (max_size, max_size), Image.Resampling.LANCZOS )
+            
+            photo = ImageTk.PhotoImage( image )
+            label_widget.configure( image=photo, text="" )
+            label_widget.image = photo  # Keep a reference
+            
+        except Exception as e:
+            label_widget.configure( image="", text=f"Error loading image:\n{str(e)}" )
+            label_widget.image = None
+            
+    def enter_fullscreen_mode( self, filepath ):
+        """Enter fullscreen mode for viewing images"""
+        self.previous_tab = self.notebook.index( self.notebook.select() )
+        
+        # Get list of images in the same directory
+        directory = os.path.dirname( filepath )
+        self.fullscreen_images = []
+        
+        try:
+            for file in sorted( os.listdir( directory ) ):
+                file_path = os.path.join( directory, file )
+                if self.is_image_file( file_path ):
+                    self.fullscreen_images.append( file_path )
+                    
+            self.fullscreen_index = self.fullscreen_images.index( filepath ) if filepath in self.fullscreen_images else 0
+        except (ValueError, OSError):
+            self.fullscreen_images = [filepath]
+            self.fullscreen_index = 0
+            
+        # Create fullscreen window
+        self.fullscreen_window = tk.Toplevel( self.root )
+        self.fullscreen_window.title( "Fullscreen View" )
+        self.fullscreen_window.state( 'zoomed' )  # Maximize on Windows
+        self.fullscreen_window.configure( bg='black' )
+        
+        # Fullscreen image label
+        self.fullscreen_label = tk.Label( self.fullscreen_window, bg='black' )
+        self.fullscreen_label.pack( fill=tk.BOTH, expand=True )
+        
+        # Bind events
+        self.fullscreen_window.bind( "<Double-Button-1>", self.exit_fullscreen_mode )
+        self.fullscreen_window.bind( "<Button-3>", self.on_fullscreen_right_click )
+        self.fullscreen_window.bind( "<MouseWheel>", self.on_fullscreen_scroll )
+        self.fullscreen_window.focus_set()
+        
+        # Display current image
+        self.display_fullscreen_image()
+        
+    def display_fullscreen_image( self ):
+        """Display the current image in fullscreen mode"""
+        if not self.fullscreen_images or self.fullscreen_index >= len( self.fullscreen_images ):
+            return
+            
+        filepath = self.fullscreen_images[self.fullscreen_index]
+        
+        try:
+            image = Image.open( filepath )
+            
+            # Get screen dimensions
+            screen_width = self.fullscreen_window.winfo_screenwidth()
+            screen_height = self.fullscreen_window.winfo_screenheight()
+            
+            # Calculate size to fit screen while maintaining aspect ratio
+            image_ratio = image.width / image.height
+            screen_ratio = screen_width / screen_height
+            
+            if image_ratio > screen_ratio:
+                # Image is wider than screen ratio
+                new_width = screen_width
+                new_height = int( screen_width / image_ratio )
+            else:
+                # Image is taller than screen ratio
+                new_height = screen_height
+                new_width = int( screen_height * image_ratio )
+                
+            image = image.resize( (new_width, new_height), Image.Resampling.LANCZOS )
+            photo = ImageTk.PhotoImage( image )
+            
+            self.fullscreen_label.configure( image=photo )
+            self.fullscreen_label.image = photo
+            
+            # Update window title
+            filename = os.path.basename( filepath )
+            self.fullscreen_window.title( f"Fullscreen View - {filename} ({self.fullscreen_index + 1}/{len(self.fullscreen_images)})" )
+            
+        except Exception as e:
+            self.fullscreen_label.configure( image="", text=f"Error loading image: {str(e)}", fg='white' )
+            self.fullscreen_label.image = None
+            
+    def on_fullscreen_scroll( self, event ):
+        """Handle mouse wheel in fullscreen mode"""
+        if event.delta > 0:
+            # Scroll up - previous image
+            self.fullscreen_index = (self.fullscreen_index - 1) % len( self.fullscreen_images )
+        else:
+            # Scroll down - next image
+            self.fullscreen_index = (self.fullscreen_index + 1) % len( self.fullscreen_images )
+            
+        self.display_fullscreen_image()
+        
+    def exit_fullscreen_mode( self, event=None ):
+        """Exit fullscreen mode and return to previous tab"""
+        if self.fullscreen_window:
+            self.fullscreen_window.destroy()
+            self.fullscreen_window = None
+            
+        if self.previous_tab is not None:
+            self.notebook.select( self.previous_tab )
+            
+    def on_fullscreen_right_click( self, event ):
+        """Handle right click in fullscreen mode"""
+        if self.fullscreen_images and self.fullscreen_index < len( self.fullscreen_images ):
+            filepath = self.fullscreen_images[self.fullscreen_index]
+            self.show_tag_dialog( filepath )
+            
+    def setup_database_tab( self ):
+        """Setup the Database tab interface"""
+        # This method is already called in setup_ui, content was defined above
+        pass
+        
+    def on_tab_changed( self, event ):
+        """Handle tab change events"""
+        current_tab = self.notebook.index( self.notebook.select() )
+        if current_tab == 1:  # Database tab
+            self.refresh_database_view()
+            
+    def create_database( self ):
+        """Create a new database for a selected directory"""
+        directory = filedialog.askdirectory( title="Select directory to catalog" )
+        if not directory:
+            return
+            
+        db_name = simpledialog.askstring( "Database Name", "Enter name for the new database:" )
+        if not db_name:
+            return
+            
+        if not db_name.endswith( '.db' ):
+            db_name += '.db'
+            
+        db_path = os.path.join( directory, db_name )
+        
+        try:
+            # Create database
+            conn = sqlite3.connect( db_path )
+            cursor = conn.cursor()
+            
+            # Create tables
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    rating INTEGER DEFAULT 0,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS image_tags (
+                    image_id INTEGER,
+                    tag_id INTEGER,
+                    FOREIGN KEY (image_id) REFERENCES images (id),
+                    FOREIGN KEY (tag_id) REFERENCES tags (id),
+                    PRIMARY KEY (image_id, tag_id)
+                )
+            ''' )
+            
+            # Scan directory for images
+            self.scan_directory_for_images( cursor, directory )
+            
+            conn.commit()
+            conn.close()
+            
+            # Open the newly created database
+            self.current_database_path = db_path
+            self.current_database = directory
+            self.refresh_database_view()
+            self.notebook.select( 1 )  # Switch to Database tab
+            
+            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
+            
+    def scan_directory_for_images( self, cursor, directory ):
+        """Scan directory recursively for image files and add to database"""
+        for root, dirs, files in os.walk( directory ):
+            for file in files:
+                filepath = os.path.join( root, file )
+                if self.is_image_file( filepath ):
+                    try:
+                        # Get image dimensions
+                        with Image.open( filepath ) as img:
+                            width, height = img.size
+                            
+                        # Calculate relative path
+                        relative_path = os.path.relpath( filepath, directory )
+                        
+                        # Insert into database
+                        cursor.execute( '''
+                            INSERT INTO images (filename, relative_path, width, height)
+                            VALUES (?, ?, ?, ?)
+                        ''', (file, relative_path, width, height) )
+                        
+                    except Exception as e:
+                        print( f"Error processing {filepath}: {e}" )
+                        
+    def open_database( self ):
+        """Open an existing database file"""
+        db_path = filedialog.askopenfilename( 
+            title="Select database file",
+            filetypes=[("Database files", "*.db"), ("All files", "*.*")]
+        )
+        
+        if not db_path:
+            return
+            
+        try:
+            # Test database connection
+            conn = sqlite3.connect( db_path )
+            cursor = conn.cursor()
+            cursor.execute( "SELECT name FROM sqlite_master WHERE type='table'" )
+            tables = cursor.fetchall()
+            conn.close()
+            
+            required_tables = {'images', 'tags', 'image_tags'}
+            existing_tables = {table[0] for table in tables}
+            
+            if not required_tables.issubset( existing_tables ):
+                messagebox.showerror( "Error", "Invalid database file - missing required tables" )
+                return
+                
+            self.current_database_path = db_path
+            self.current_database = os.path.dirname( db_path )
+            self.refresh_database_view()
+            self.notebook.select( 1 )  # Switch to Database tab
+            
+            messagebox.showinfo( "Success", f"Database opened: {os.path.basename(db_path)}" )
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to open database: {str(e)}" )
+            
+    def rescan_database( self ):
+        """Rescan the database directory for new/removed images"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get current images in database
+            cursor.execute( "SELECT id, relative_path FROM images" )
+            db_images = {row[1]: row[0] for row in cursor.fetchall()}
+            
+            # Scan directory for current images
+            current_images = set()
+            for root, dirs, files in os.walk( self.current_database ):
+                for file in files:
+                    filepath = os.path.join( root, file )
+                    if self.is_image_file( filepath ):
+                        relative_path = os.path.relpath( filepath, self.current_database )
+                        current_images.add( relative_path )
+                        
+                        # Add new images
+                        if relative_path not in db_images:
+                            try:
+                                with Image.open( filepath ) as img:
+                                    width, height = img.size
+                                    
+                                cursor.execute( '''
+                                    INSERT INTO images (filename, relative_path, width, height)
+                                    VALUES (?, ?, ?, ?)
+                                ''', (file, relative_path, width, height) )
+                            except Exception as e:
+                                print( f"Error adding {filepath}: {e}" )
+                                
+            # Remove images that no longer exist
+            for relative_path, image_id in db_images.items():
+                if relative_path not in current_images:
+                    cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (image_id,) )
+                    cursor.execute( "DELETE FROM images WHERE id = ?", (image_id,) )
+                    
+            conn.commit()
+            conn.close()
+            
+            self.refresh_database_view()
+            messagebox.showinfo( "Success", "Database rescanned successfully" )
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to rescan database: {str(e)}" )
+            
+    def refresh_database_view( self ):
+        """Refresh the database tab view"""
+        if not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Load all tags
+            cursor.execute( "SELECT name FROM tags ORDER BY name" )
+            tags = [row[0] for row in cursor.fetchall()]
+            
+            self.tag_listbox.delete( 0, tk.END )
+            for tag in tags:
+                self.tag_listbox.insert( tk.END, tag )
+                
+            # Load filtered images
+            self.refresh_filtered_images()
+            
+            conn.close()
+            
+        except Exception as e:
+            print( f"Error refreshing database view: {e}" )
+            
+    def refresh_filtered_images( self ):
+        """Refresh the filtered image list based on current tag filters"""
+        if not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Build query based on filters
+            query = "SELECT DISTINCT i.relative_path, i.filename FROM images i"
+            params = []
+            
+            if self.included_tags or self.excluded_tags:
+                query += " LEFT JOIN image_tags it ON i.id = it.image_id LEFT JOIN tags t ON it.tag_id = t.id"
+                
+                conditions = []
+                
+                if self.included_tags:
+                    placeholders = ','.join( ['?'] * len( self.included_tags ) )
+                    conditions.append( f"t.name IN ({placeholders})" )
+                    params.extend( self.included_tags )
+                    
+                if self.excluded_tags:
+                    placeholders = ','.join( ['?'] * len( self.excluded_tags ) )
+                    conditions.append( f"i.id NOT IN (SELECT it2.image_id FROM image_tags it2 JOIN tags t2 ON it2.tag_id = t2.id WHERE t2.name IN ({placeholders}))" )
+                    params.extend( self.excluded_tags )
+                    
+                if conditions:
+                    query += " WHERE " + " AND ".join( conditions )
+                    
+            query += " ORDER BY i.filename"
+            
+            cursor.execute( query, params )
+            images = cursor.fetchall()
+            
+            self.database_image_listbox.delete( 0, tk.END )
+            for relative_path, filename in images:
+                self.database_image_listbox.insert( tk.END, filename )
+                
+            conn.close()
+            
+        except Exception as e:
+            print( f"Error refreshing filtered images: {e}" )
+            
+    def on_database_image_select( self, event ):
+        """Handle selection in database image list"""
+        selection = self.database_image_listbox.curselection()
+        if selection and self.current_database:
+            index = selection[0]
+            filename = self.database_image_listbox.get( index )
+            
+            # Find full path
+            filepath = self.find_image_path( filename )
+            if filepath:
+                self.display_image_preview( filepath, self.database_preview_label )
+                
+    def on_database_image_double_click( self, event ):
+        """Handle double click in database image list"""
+        selection = self.database_image_listbox.curselection()
+        if selection and self.current_database:
+            index = selection[0]
+            filename = self.database_image_listbox.get( index )
+            
+            filepath = self.find_image_path( filename )
+            if filepath:
+                self.enter_fullscreen_mode( filepath )
+                
+    def on_database_image_right_click( self, event ):
+        """Handle right click in database image list"""
+        # Get the item under the cursor
+        index = self.database_image_listbox.nearest( event.y )
+        if index >= 0:
+            self.database_image_listbox.selection_clear( 0, tk.END )
+            self.database_image_listbox.selection_set( index )
+            
+            filename = self.database_image_listbox.get( index )
+            filepath = self.find_image_path( filename )
+            if filepath:
+                self.show_tag_dialog( filepath )
+                
+    def find_image_path( self, filename ):
+        """Find the full path of an image file by filename"""
+        if not self.current_database_path:
+            return None
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            cursor.execute( "SELECT relative_path FROM images WHERE filename = ?", (filename,) )
+            result = cursor.fetchone()
+            conn.close()
+            
+            if result:
+                return os.path.join( self.current_database, result[0] )
+                
+        except Exception as e:
+            print( f"Error finding image path: {e}" )
+            
+        return None
+        
+    def include_tags( self ):
+        """Include selected tags in filter"""
+        selection = self.tag_listbox.curselection()
+        for index in selection:
+            tag = self.tag_listbox.get( index )
+            self.included_tags.add( tag )
+            self.excluded_tags.discard( tag )
+            
+        self.refresh_filtered_images()
+        
+    def exclude_tags( self ):
+        """Exclude selected tags from filter"""
+        selection = self.tag_listbox.curselection()
+        for index in selection:
+            tag = self.tag_listbox.get( index )
+            self.excluded_tags.add( tag )
+            self.included_tags.discard( tag )
+            
+        self.refresh_filtered_images()
+        
+    def clear_filters( self ):
+        """Clear all tag filters"""
+        self.included_tags.clear()
+        self.excluded_tags.clear()
+        self.refresh_filtered_images()
+        
+    def show_tag_dialog( self, filepath ):
+        """Show dialog for adding/editing tags for an image"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+            
+        dialog = TagDialog( self.root, filepath, self.current_database_path )
+        self.root.wait_window( dialog.dialog )
+        
+        # Refresh views after tag changes
+        self.refresh_database_view()
+
+class TagDialog:
+    def __init__( self, parent, filepath, database_path ):
+        self.filepath = filepath
+        self.database_path = database_path
+        self.filename = os.path.basename( filepath )
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel( parent )
+        self.dialog.title( f"Tags for {self.filename}" )
+        self.dialog.geometry( "400x500" )
+        self.dialog.transient( parent )
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.geometry( "+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50) )
+        
+        self.setup_dialog()
+        self.load_tags()
+        
+    def setup_dialog( self ):
+        """Setup the tag dialog interface"""
+        # Existing tags section
+        existing_frame = ttk.LabelFrame( self.dialog, text="Existing Tags" )
+        existing_frame.pack( fill=tk.BOTH, expand=True, padx=10, pady=5 )
+        
+        # Tag listbox with checkboxes (simulated with listbox)
+        self.tag_listbox = tk.Listbox( existing_frame, selectmode=tk.MULTIPLE, height=15 )
+        tag_scrollbar = ttk.Scrollbar( existing_frame, orient=tk.VERTICAL, command=self.tag_listbox.yview )
+        self.tag_listbox.configure( yscrollcommand=tag_scrollbar.set )
+        
+        self.tag_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # New tags section
+        new_frame = ttk.LabelFrame( self.dialog, text="Add New Tags" )
+        new_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        ttk.Label( new_frame, text="Enter new tags (comma-separated):" ).pack( anchor=tk.W )
+        self.new_tags_entry = tk.Entry( new_frame, width=50 )
+        self.new_tags_entry.pack( fill=tk.X, pady=5 )
+        
+        # Rating section
+        rating_frame = ttk.LabelFrame( self.dialog, text="Rating (1-10)" )
+        rating_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        self.rating_var = tk.IntVar( value=0 )
+        rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.rating_var )
+        rating_scale.pack( fill=tk.X )
+        
+        # Buttons
+        button_frame = ttk.Frame( self.dialog )
+        button_frame.pack( fill=tk.X, padx=10, pady=10 )
+        
+        ttk.Button( button_frame, text="Save", command=self.save_tags ).pack( side=tk.RIGHT, padx=5 )
+        ttk.Button( button_frame, text="Cancel", command=self.dialog.destroy ).pack( side=tk.RIGHT )
+        
+    def load_tags( self ):
+        """Load existing tags and current image tags"""
+        try:
+            conn = sqlite3.connect( self.database_path )
+            cursor = conn.cursor()
+            
+            # Get image ID
+            relative_path = os.path.relpath( self.filepath, os.path.dirname( self.database_path ) )
+            cursor.execute( "SELECT id, rating FROM images WHERE relative_path = ?", (relative_path,) )
+            result = cursor.fetchone()
+            
+            if not result:
+                messagebox.showerror( "Error", "Image not found in database" )
+                self.dialog.destroy()
+                return
+                
+            self.image_id = result[0]
+            self.rating_var.set( result[1] or 0 )
+            
+            # Get all tags
+            cursor.execute( "SELECT id, name FROM tags ORDER BY name" )
+            all_tags = cursor.fetchall()
+            
+            # Get current image tags
+            cursor.execute( '''
+                SELECT t.name FROM tags t
+                JOIN image_tags it ON t.id = it.tag_id
+                WHERE it.image_id = ?
+            ''', (self.image_id,) )
+            current_tags = {row[0] for row in cursor.fetchall()}
+            
+            # Populate listbox
+            self.tag_data = {}
+            for tag_id, tag_name in all_tags:
+                index = self.tag_listbox.size()
+                display_text = f"✓ {tag_name}" if tag_name in current_tags else f"  {tag_name}"
+                self.tag_listbox.insert( tk.END, display_text )
+                self.tag_data[index] = (tag_id, tag_name, tag_name in current_tags)
+                
+                if tag_name in current_tags:
+                    self.tag_listbox.selection_set( index )
+                    
+            conn.close()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to load tags: {str(e)}" )
+            self.dialog.destroy()
+            
+    def save_tags( self ):
+        """Save tag changes to database"""
+        try:
+            conn = sqlite3.connect( self.database_path )
+            cursor = conn.cursor()
+            
+            # Update rating
+            cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (self.rating_var.get(), self.image_id) )
+            
+            # Clear existing tags for this image
+            cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (self.image_id,) )
+            
+            # Add selected existing tags
+            selected_indices = self.tag_listbox.curselection()
+            for index in selected_indices:
+                if index in self.tag_data:
+                    tag_id, tag_name, _ = self.tag_data[index]
+                    cursor.execute( "INSERT INTO image_tags (image_id, tag_id) VALUES (?, ?)", (self.image_id, tag_id) )
+                    
+            # Add new tags
+            new_tags_text = self.new_tags_entry.get().strip()
+            if new_tags_text:
+                new_tags = [tag.strip() for tag in new_tags_text.split( ',' ) if tag.strip()]
+                
+                for tag_name in new_tags:
+                    # Insert tag if it doesn't exist
+                    cursor.execute( "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,) )
+                    
+                    # Get tag ID
+                    cursor.execute( "SELECT id FROM tags WHERE name = ?", (tag_name,) )
+                    tag_id = cursor.fetchone()[0]
+                    
+                    # Link tag to image
+                    cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", (self.image_id, tag_id) )
+                    
+            conn.commit()
+            conn.close()
+            
+            self.dialog.destroy()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to save tags: {str(e)}" )
+
+def main():
+    root = tk.Tk()
+    app = ImageViewer( root )
+    root.mainloop()
+
+if __name__ == "__main__":
+    main()
