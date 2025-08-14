@@ -17,7 +17,7 @@ class ImageViewer:
     def __init__( self, root ):
         self.root = root
         self.root.title( "Image Viewer" )
-        self.root.geometry( "1200x800" )
+        # Window geometry will be set by restore_window_geometry()
         
         # Application state
         self.current_database = None
@@ -42,6 +42,9 @@ class ImageViewer:
         self.setup_database_menu()
         self.load_settings()
         
+        # Restore window geometry after everything is set up
+        self.root.after( 100, self.restore_window_geometry )
+        
         # Bind window close event to save settings
         self.root.protocol( "WM_DELETE_WINDOW", self.on_closing )
         
@@ -61,7 +64,7 @@ class ImageViewer:
         self.notebook.add( self.database_frame, text="Database" )
         self.setup_database_tab()
         
-        # Bind tab change event
+        # Bind tab change event to restore positions when database tab is selected
         self.notebook.bind( "<<NotebookTabChanged>>", self.on_tab_changed )
         
     def setup_database_menu( self ):
@@ -180,9 +183,13 @@ class ImageViewer:
         right_frame = ttk.Frame( paned )
         paned.add( right_frame, weight=2 )
         
+        # Create vertical paned window for resizable sections
+        vertical_paned = ttk.PanedWindow( right_frame, orient=tk.VERTICAL )
+        vertical_paned.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        
         # Top section - Split into Tag Filters and Image Tags
-        top_section = ttk.Frame( right_frame )
-        top_section.pack( fill=tk.X, padx=5, pady=5 )
+        top_section = ttk.Frame( vertical_paned )
+        vertical_paned.add( top_section, weight=1 )
         
         # Left side - Tag filter section
         tag_frame = ttk.LabelFrame( top_section, text="Tag Filters" )
@@ -205,6 +212,7 @@ class ImageViewer:
         tag_canvas_frame.pack( fill=tk.BOTH, expand=True, pady=2 )
         
         self.image_tag_canvas = tk.Canvas( tag_canvas_frame, height=120 )
+        self.image_tag_canvas.configure( highlightthickness=0 )  # Remove border
         image_tag_scrollbar = ttk.Scrollbar( tag_canvas_frame, orient=tk.VERTICAL, command=self.image_tag_canvas.yview )
         self.image_tag_scrollable_frame = ttk.Frame( self.image_tag_canvas )
         
@@ -220,9 +228,18 @@ class ImageViewer:
             self.image_tag_canvas.yview_scroll( int( -1 * (event.delta / 120) ), "units" )
         self.image_tag_canvas.bind( "<MouseWheel>", on_image_tag_canvas_scroll )
         
-        # New tags section
+        # Rating section - pack at bottom before Apply button
+        rating_frame = ttk.Frame( image_tags_frame )
+        rating_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=5, pady=2 )
+        
+        ttk.Label( rating_frame, text="Rating:" ).pack( anchor=tk.W )
+        self.image_rating_var = tk.IntVar( value=0 )
+        self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.image_rating_var )
+        self.image_rating_scale.pack( fill=tk.X, pady=(2, 0) )
+        
+        # New tags section - pack at bottom before Rating
         new_tags_frame = ttk.Frame( image_tags_frame )
-        new_tags_frame.pack( fill=tk.X, padx=5, pady=2 )
+        new_tags_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=5, pady=2 )
         
         ttk.Label( new_tags_frame, text="Add New Tags:" ).pack( anchor=tk.W )
         self.image_new_tags_entry = tk.Entry( new_tags_frame )
@@ -231,18 +248,9 @@ class ImageViewer:
         # Bind Enter key to apply new tags
         self.image_new_tags_entry.bind( "<Return>", lambda e: self.apply_image_tag_changes() )
         
-        # Rating section
-        rating_frame = ttk.Frame( image_tags_frame )
-        rating_frame.pack( fill=tk.X, padx=5, pady=2 )
-        
-        ttk.Label( rating_frame, text="Rating:" ).pack( anchor=tk.W )
-        self.image_rating_var = tk.IntVar( value=0 )
-        self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.image_rating_var )
-        self.image_rating_scale.pack( fill=tk.X, pady=(2, 0) )
-        
-        # Apply button
+        # Apply button - ensure it's always at the bottom of image_tags_frame
         apply_frame = ttk.Frame( image_tags_frame )
-        apply_frame.pack( fill=tk.X, padx=5, pady=(2, 5) )
+        apply_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=5, pady=(2, 5) )
         
         self.image_apply_button = ttk.Button( apply_frame, text="Apply", command=self.apply_image_tag_changes, state='disabled' )
         self.image_apply_button.pack( side=tk.RIGHT )
@@ -272,6 +280,7 @@ class ImageViewer:
         tag_filter_frame.grid_rowconfigure( 2, weight=1 )
         
         self.tag_canvas = tk.Canvas( canvas_frame, height=150 )
+        self.tag_canvas.configure( highlightthickness=0 )  # Remove border
         tag_scrollbar = ttk.Scrollbar( canvas_frame, orient=tk.VERTICAL, command=self.tag_canvas.yview )
         self.tag_scrollable_frame = ttk.Frame( self.tag_canvas )
         
@@ -289,15 +298,55 @@ class ImageViewer:
         self.tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
         tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
         
-        # Clear filters button
+        # Clear filters button - ensure it's always at the bottom of tag_frame
         filter_button_frame = ttk.Frame( tag_frame )
-        filter_button_frame.pack( fill=tk.X, pady=5 )
+        filter_button_frame.pack( side=tk.BOTTOM, fill=tk.X, pady=5 )
         
         ttk.Button( filter_button_frame, text="Clear All Filters", command=self.clear_filters ).pack( side=tk.LEFT, padx=2 )
         
         # Image list section
-        image_frame = ttk.LabelFrame( right_frame, text="Filtered Images" )
-        image_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        image_frame = ttk.LabelFrame( vertical_paned, text="Filtered Images" )
+        vertical_paned.add( image_frame, weight=2 )
+        
+        # Store references to paned windows for size management
+        self.vertical_paned = vertical_paned
+        self.horizontal_paned = paned  # Reference to the main horizontal paned window
+        
+        # Configure minimum sizes for paned window sections with dynamic constraints
+        def configure_pane_constraints():
+            # Calculate minimum height needed for essential UI elements
+            # Base height: buttons + labels + padding = ~160px
+            # Scrollable areas: minimum 2 rows = ~50px each = 100px
+            # Total minimum: ~260px
+            min_top_height = 260
+            min_bottom_height = 100  # Minimum for image list
+            
+            try:
+                # Try ttk.PanedWindow pane configuration
+                vertical_paned.pane( 0, minsize=min_top_height )
+                vertical_paned.pane( 1, minsize=min_bottom_height )
+            except:
+                # Fallback - set initial sash position
+                vertical_paned.after( 100, lambda: vertical_paned.sashpos( 0, min_top_height + 50 ) )
+        
+        # Apply constraints and restore positions after window is fully initialized
+        self.root.after( 100, configure_pane_constraints )
+        
+        # Ensure restoration happens when window is fully visible
+        def delayed_restore():
+            self.root.after( 100, self.restore_paned_positions )
+        
+        self.root.after( 500, delayed_restore )
+        
+        # Add resize handler to enforce minimum scrollable area heights and save positions
+        def on_paned_configure( event ):
+            self.enforce_scrollable_minimums()
+            # Save positions after a short delay to avoid excessive saves during dragging
+            if hasattr( self, '_save_timer' ):
+                self.root.after_cancel( self._save_timer )
+            self._save_timer = self.root.after( 1000, self.save_paned_positions_only )
+        
+        vertical_paned.bind( "<Configure>", on_paned_configure )
         
         # Image listbox with scrollbar
         image_list_frame = ttk.Frame( image_frame )
@@ -484,11 +533,11 @@ class ImageViewer:
                 self.update_browse_folder_images( filepath )
                 self.display_image_preview( filepath, self.browse_preview_label )
                 # Save the directory containing the selected image
-                self.save_current_directory( self.current_browse_directory )
+                self.save_directory_only( self.current_browse_directory )
             elif os.path.isdir( filepath ):
                 # User selected a directory
                 self.current_browse_directory = filepath
-                self.save_current_directory( filepath )
+                self.save_directory_only( filepath )
                 
     def on_browse_tree_double_click( self, event ):
         """Handle double click in browse tree"""
@@ -819,6 +868,8 @@ class ImageViewer:
         current_tab = self.notebook.index( self.notebook.select() )
         if current_tab == 1:  # Database tab
             self.refresh_database_view()
+            # Restore paned positions when switching to database tab
+            self.root.after( 100, self.restore_paned_positions )
             
     def create_database( self ):
         """Create a new database for a selected directory"""
@@ -1889,7 +1940,7 @@ class ImageViewer:
             self.load_directory_tree()
             
     def save_current_directory( self, directory ):
-        """Save the current directory to settings"""
+        """Save the current directory and window state to settings"""
         try:
             settings = {}
             if os.path.exists( self.settings_file ):
@@ -1897,12 +1948,266 @@ class ImageViewer:
                     settings = json.load( f )
                     
             settings['last_directory'] = directory
+            self.save_paned_positions( settings )
+            self.save_window_geometry( settings )
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )
                 
         except Exception as e:
             print( f"Error saving settings: {e}" )
+    
+    def save_directory_only( self, directory ):
+        """Save only the directory to settings without affecting window geometry"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    
+            settings['last_directory'] = directory
+            # Don't call save_window_geometry here - only save directory
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+                
+        except Exception as e:
+            print( f"Error saving directory: {e}" )
+    
+    def save_paned_positions( self, settings ):
+        """Save paned window positions to settings"""
+        try:
+            # Save vertical paned position (database tab)
+            if hasattr( self, 'vertical_paned' ):
+                pos = self.vertical_paned.sashpos( 0 )
+                if pos > 0:  # Only save valid positions
+                    settings["vertical_paned_pos"] = pos
+            
+            # Save horizontal paned position (main database paned window)
+            if hasattr( self, 'horizontal_paned' ):
+                pos = self.horizontal_paned.sashpos( 0 )
+                if pos > 0:  # Only save valid positions
+                    settings["horizontal_paned_pos"] = pos
+                    
+        except Exception as e:
+            print( f"Error saving paned positions: {e}" )
+    
+    def save_window_geometry( self, settings ):
+        """Save window position and size to settings"""
+        try:
+            # Get current window geometry
+            geometry = self.root.geometry()  # Returns format like "800x600+100+50"
+
+            
+            # Parse geometry string - handle negative coordinates
+            if 'x' in geometry:
+                # Split into size and position parts
+                # Handle negative coordinates by using rsplit and manual parsing
+                if '+' in geometry or '-' in geometry[geometry.find('x')+1:]:
+                    size_part = geometry.split('+')[0].split('-')[0]  # Get the size part
+                    
+                    # Find position part after size
+                    pos_start = len(size_part)
+                    pos_part = geometry[pos_start:]  # Everything after size
+                    
+                    # Parse coordinates, handling negative values
+                    coords = []
+                    current_coord = ""
+                    for i, char in enumerate(pos_part):
+                        if char in '+-' and i > 0:
+                            if current_coord:
+                                coords.append(int(current_coord))
+                            current_coord = char
+                        else:
+                            current_coord += char
+                    if current_coord:
+                        coords.append(int(current_coord))
+                    
+                    if len(coords) >= 2:
+                        width, height = size_part.split('x')
+                        x_pos, y_pos = coords[0], coords[1]
+                        
+                        # Don't save invalid or tiny window sizes
+                        if int(width) > 100 and int(height) > 100:
+                            settings['window'] = {
+                                'width': int( width ),
+                                'height': int( height ),
+                                'x': int( x_pos ),
+                                'y': int( y_pos )
+                            }
+                        # else: silently skip invalid sizes
+                    
+        except Exception as e:
+            print( f"Error saving window geometry: {e}" )
+    
+    def restore_paned_positions( self ):
+        """Restore paned window positions from settings"""
+        try:
+            if not os.path.exists( self.settings_file ):
+                return
+                
+            with open( self.settings_file, 'r' ) as f:
+                settings = json.load( f )
+            
+            # Restore vertical paned position (database tab)
+            if hasattr( self, 'vertical_paned' ) and "vertical_paned_pos" in settings:
+                pos = settings["vertical_paned_pos"]
+                if pos > 260:  # Ensure minimum constraints are respected
+                    self.vertical_paned.sashpos( 0, pos )
+            
+            # Restore horizontal paned position (main database paned window)
+            if hasattr( self, 'horizontal_paned' ) and "horizontal_paned_pos" in settings:
+                pos = settings["horizontal_paned_pos"]
+                if pos > 100:  # Ensure reasonable minimum
+                    self.horizontal_paned.sashpos( 0, pos )
+                        
+        except Exception as e:
+            print( f"Error restoring paned positions: {e}" )
+    
+    def restore_window_geometry( self ):
+        """Restore window position and size from settings"""
+        try:
+
+            if not os.path.exists( self.settings_file ):
+
+                self.set_default_window_geometry()
+                return
+                
+            with open( self.settings_file, 'r' ) as f:
+                settings = json.load( f )
+            
+            if 'window' not in settings:
+
+                self.set_default_window_geometry()
+                return
+                
+            window_settings = settings['window']
+            width = window_settings.get( 'width', 1000 )
+            height = window_settings.get( 'height', 700 )
+            x = window_settings.get( 'x', 100 )
+            y = window_settings.get( 'y', 100 )
+
+            
+            # Validate position is on screen
+            if self.is_position_valid( x, y, width, height ):
+                geometry = f"{width}x{height}+{x}+{y}"
+
+                self.root.geometry( geometry )
+            else:
+
+                self.set_default_window_geometry()
+                
+        except Exception as e:
+            print( f"Error restoring window geometry: {e}" )
+            self.set_default_window_geometry()
+    
+    def set_default_window_geometry( self ):
+        """Set default window size and center it on screen"""
+        try:
+            default_width = 1000
+            default_height = 700
+            
+            # Get screen dimensions
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            
+            # Center the window
+            x = (screen_width - default_width) // 2
+            y = (screen_height - default_height) // 2
+            
+            geometry = f"{default_width}x{default_height}+{x}+{y}"
+
+            self.root.geometry( geometry )
+            
+        except Exception as e:
+            print( f"Error setting default geometry: {e}" )
+    
+    def is_position_valid( self, x, y, width, height ):
+        """Check if window position is valid for multi-monitor setups"""
+        try:
+            # Get primary screen dimensions
+            screen_width = self.root.winfo_screenwidth()
+            screen_height = self.root.winfo_screenheight()
+            
+            # Basic sanity checks first
+            if width <= 0 or height <= 0:
+                return False
+            if width > screen_width * 3 or height > screen_height * 3:
+                return False  # Unreasonably large window
+                
+            # For multi-monitor setups, be very permissive with coordinates
+            # Modern setups can have monitors arranged in various configurations:
+            # - Secondary monitor to the right: x can be 1920, 2560, 3840, etc.
+            # - Secondary monitor to the left: x can be negative (-1920, etc.)
+            # - Secondary monitor above: y can be negative
+            # - Secondary monitor below: y can be large positive
+            
+            # Allow very wide range for X coordinates (horizontal multi-monitor)
+            max_x = screen_width * 6  # Support up to 6 monitors horizontally
+            min_x = -screen_width * 3  # Support monitors to the left
+            
+            # Allow reasonable range for Y coordinates (vertical arrangements less common)
+            max_y = screen_height * 3  # Support stacked monitors
+            min_y = -screen_height * 2  # Support monitors above
+            
+            if x < min_x or x > max_x:
+                return False
+            if y < min_y or y > max_y:
+                return False
+            
+            # Additional check: ensure at least part of window would be theoretically visible
+            # Window is completely off-screen if:
+            # - Right edge is before virtual desktop left edge
+            # - Left edge is after virtual desktop right edge  
+            # - Bottom edge is before virtual desktop top edge
+            # - Top edge is after virtual desktop bottom edge
+            
+            # For now, if it passes the basic range checks above, accept it
+            # tkinter will handle placing it appropriately if the monitor is disconnected
+            return True
+            
+        except Exception as e:
+            print( f"Error validating position: {e}" )
+            return False
+    
+    def enforce_scrollable_minimums( self ):
+        """Ensure scrollable areas maintain minimum height (2 rows ≈ 50px)"""
+        try:
+            min_canvas_height = 50  # Minimum height for 2 rows
+            
+            # Enforce minimum height for tag filter canvas
+            if hasattr( self, 'tag_canvas' ):
+                current_height = self.tag_canvas.winfo_height()
+                if current_height > 1 and current_height < min_canvas_height:
+                    self.tag_canvas.configure( height=min_canvas_height )
+            
+            # Enforce minimum height for image tag canvas
+            if hasattr( self, 'image_tag_canvas' ):
+                current_height = self.image_tag_canvas.winfo_height()
+                if current_height > 1 and current_height < min_canvas_height:
+                    self.image_tag_canvas.configure( height=min_canvas_height )
+                    
+        except Exception as e:
+            print( f"Error enforcing scrollable minimums: {e}" )
+    
+
+    
+    def save_paned_positions_only( self ):
+        """Save paned positions and window geometry to settings (called during resize)"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            self.save_paned_positions( settings )
+            self.save_window_geometry( settings )
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+                
+        except Exception as e:
+            print( f"Error saving paned positions: {e}" )
             
     def on_closing( self ):
         """Handle application closing"""
