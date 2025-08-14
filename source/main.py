@@ -244,7 +244,7 @@ class ImageViewer:
         image_list_frame = ttk.Frame( image_frame )
         image_list_frame.pack( fill=tk.BOTH, expand=True )
         
-        self.database_image_listbox = tk.Listbox( image_list_frame )
+        self.database_image_listbox = tk.Listbox( image_list_frame, selectmode=tk.EXTENDED )
         image_scrollbar = ttk.Scrollbar( image_list_frame, orient=tk.VERTICAL, command=self.database_image_listbox.yview )
         self.database_image_listbox.configure( yscrollcommand=image_scrollbar.set )
         
@@ -979,8 +979,14 @@ class ImageViewer:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
-            # Load all tags
-            cursor.execute( "SELECT name FROM tags ORDER BY name" )
+            # Load only tags that are actually used by files in the database
+            cursor.execute( """
+                SELECT DISTINCT t.name 
+                FROM tags t 
+                INNER JOIN image_tags it ON t.id = it.tag_id 
+                INNER JOIN images i ON it.image_id = i.id 
+                ORDER BY t.name
+            """ )
             tags = [row[0] for row in cursor.fetchall()]
             
             # Clear existing tag checkboxes
@@ -1101,15 +1107,24 @@ class ImageViewer:
         """Handle selection in database image list"""
         selection = self.database_image_listbox.curselection()
         if selection and self.current_database:
-            index = selection[0]
-            filename = self.database_image_listbox.get( index )
-            
-            # Find full path
-            filepath = self.find_image_path( filename )
-            if filepath:
-                self.current_database_image = filepath
-                self.display_image_preview( filepath, self.database_preview_label )
-                self.display_image_tags( filename )
+            if len( selection ) == 1:
+                # Single selection - show preview and tags
+                index = selection[0]
+                filename = self.database_image_listbox.get( index )
+                
+                # Find full path
+                filepath = self.find_image_path( filename )
+                if filepath:
+                    self.current_database_image = filepath
+                    self.display_image_preview( filepath, self.database_preview_label )
+                    self.display_image_tags( filename )
+            else:
+                # Multiple selection - show common tags only
+                filenames = [self.database_image_listbox.get( i ) for i in selection]
+                self.current_database_image = None
+                self.database_preview_label.configure( image="", text=f"{len(selection)} images selected" )
+                self.database_preview_label.image = None
+                self.display_common_tags( filenames )
                 
     def on_database_image_double_click( self, event ):
         """Handle double click in database image list"""
@@ -1127,13 +1142,27 @@ class ImageViewer:
         # Get the item under the cursor
         index = self.database_image_listbox.nearest( event.y )
         if index >= 0:
-            self.database_image_listbox.selection_clear( 0, tk.END )
-            self.database_image_listbox.selection_set( index )
+            # If the clicked item is not in current selection, select only it
+            if index not in self.database_image_listbox.curselection():
+                self.database_image_listbox.selection_clear( 0, tk.END )
+                self.database_image_listbox.selection_set( index )
             
-            filename = self.database_image_listbox.get( index )
-            filepath = self.find_image_path( filename )
-            if filepath:
-                self.show_tag_dialog( filepath )
+            # Get all selected items
+            selection = self.database_image_listbox.curselection()
+            if selection:
+                if len( selection ) == 1:
+                    # Single file
+                    filename = self.database_image_listbox.get( selection[0] )
+                    filepath = self.find_image_path( filename )
+                    if filepath:
+                        self.show_tag_dialog( filepath )
+                else:
+                    # Multiple files
+                    filenames = [self.database_image_listbox.get( i ) for i in selection]
+                    filepaths = [self.find_image_path( f ) for f in filenames]
+                    filepaths = [f for f in filepaths if f]  # Remove None values
+                    if filepaths:
+                        self.show_multi_tag_dialog( filepaths )
                 
     def on_database_preview_double_click( self, event ):
         """Handle double click on database preview image"""
@@ -1206,6 +1235,52 @@ class ImageViewer:
             else:
                 self.image_tags_listbox.insert( tk.END, "(image not in database)" )
                 
+        except Exception as e:
+            self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
+            
+    def display_common_tags( self, filenames ):
+        """Display tags that are common to all selected images"""
+        self.image_tags_listbox.delete( 0, tk.END )
+        
+        if not self.current_database_path or not filenames:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get all tags for each selected image
+            all_image_tags = {}
+            for filename in filenames:
+                cursor.execute( '''
+                    SELECT t.name
+                    FROM images i
+                    LEFT JOIN image_tags it ON i.id = it.image_id
+                    LEFT JOIN tags t ON it.tag_id = t.id
+                    WHERE i.filename = ? AND t.name IS NOT NULL
+                ''', (filename,) )
+                
+                tags = {row[0] for row in cursor.fetchall()}
+                all_image_tags[filename] = tags
+                
+            # Find common tags (intersection of all sets)
+            if all_image_tags:
+                common_tags = set.intersection( *all_image_tags.values() ) if all_image_tags.values() else set()
+                
+                self.image_tags_listbox.insert( tk.END, f"{len(filenames)} images selected" )
+                self.image_tags_listbox.insert( tk.END, "─────────────" )
+                
+                if common_tags:
+                    self.image_tags_listbox.insert( tk.END, "Common tags:" )
+                    for tag in sorted( common_tags ):
+                        self.image_tags_listbox.insert( tk.END, f"  {tag}" )
+                else:
+                    self.image_tags_listbox.insert( tk.END, "(no common tags)" )
+            else:
+                self.image_tags_listbox.insert( tk.END, "(no tags found)" )
+                
+            conn.close()
+            
         except Exception as e:
             self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
         
@@ -1349,6 +1424,31 @@ class ImageViewer:
         
         # Refresh views after tag changes
         self.refresh_database_view()
+        self.refresh_tag_filters()
+        
+    def show_multi_tag_dialog( self, filepaths ):
+        """Show dialog for adding/editing tags for multiple images"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+            
+        dialog = MultiTagDialog( self.root, filepaths, self.current_database_path )
+        self.root.wait_window( dialog.dialog )
+        
+        # Refresh views after tag changes
+        self.refresh_database_view()
+        self.refresh_tag_filters()
+        
+    def refresh_tag_filters( self ):
+        """Refresh the tag filters to add new tags and remove unused ones"""
+        if not self.current_database_path:
+            return
+            
+        # Simply refresh the entire database view which will rebuild tag filters
+        self.refresh_database_view()
+        
+        # Also refresh the filtered images list based on current filter settings
+        self.refresh_filtered_images()
         
     def load_settings( self ):
         """Load application settings from file"""
@@ -1411,7 +1511,7 @@ class TagDialog:
         # Create dialog window
         self.dialog = tk.Toplevel( parent )
         self.dialog.title( f"Tags for {self.filename}" )
-        self.dialog.geometry( "400x500" )
+        self.dialog.geometry( "450x600" )
         self.dialog.transient( parent )
         self.dialog.grab_set()
         
@@ -1423,17 +1523,29 @@ class TagDialog:
         
     def setup_dialog( self ):
         """Setup the tag dialog interface"""
-        # Existing tags section
+        # Existing tags section (fixed height to ensure buttons remain visible)
         existing_frame = ttk.LabelFrame( self.dialog, text="Existing Tags" )
-        existing_frame.pack( fill=tk.BOTH, expand=True, padx=10, pady=5 )
+        existing_frame.pack( fill=tk.X, padx=10, pady=5 )
         
-        # Tag listbox with checkboxes (simulated with listbox)
-        self.tag_listbox = tk.Listbox( existing_frame, selectmode=tk.MULTIPLE, height=15 )
-        tag_scrollbar = ttk.Scrollbar( existing_frame, orient=tk.VERTICAL, command=self.tag_listbox.yview )
-        self.tag_listbox.configure( yscrollcommand=tag_scrollbar.set )
+        # Scrollable frame for tag checkboxes with fixed height
+        tag_canvas_frame = ttk.Frame( existing_frame )
+        tag_canvas_frame.pack( fill=tk.X, pady=5 )
         
-        self.tag_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        self.tag_canvas = tk.Canvas( tag_canvas_frame, height=200 )
+        tag_scrollbar = ttk.Scrollbar( tag_canvas_frame, orient=tk.VERTICAL, command=self.tag_canvas.yview )
+        self.tag_scrollable_frame = ttk.Frame( self.tag_canvas )
+        
+        self.tag_scrollable_frame.bind( "<Configure>", lambda e: self.tag_canvas.configure( scrollregion=self.tag_canvas.bbox( "all" ) ) )
+        self.tag_canvas.create_window( (0, 0), window=self.tag_scrollable_frame, anchor="nw" )
+        self.tag_canvas.configure( yscrollcommand=tag_scrollbar.set )
+        
+        self.tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
         tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Enable mouse wheel scrolling
+        def on_canvas_scroll( event ):
+            self.tag_canvas.yview_scroll( int( -1 * (event.delta / 120) ), "units" )
+        self.tag_canvas.bind( "<MouseWheel>", on_canvas_scroll )
         
         # New tags section
         new_frame = ttk.LabelFrame( self.dialog, text="Add New Tags" )
@@ -1451,9 +1563,9 @@ class TagDialog:
         rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.rating_var )
         rating_scale.pack( fill=tk.X )
         
-        # Buttons
+        # Buttons (always visible at bottom)
         button_frame = ttk.Frame( self.dialog )
-        button_frame.pack( fill=tk.X, padx=10, pady=10 )
+        button_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=10, pady=10 )
         
         ttk.Button( button_frame, text="Save", command=self.save_tags ).pack( side=tk.RIGHT, padx=5 )
         ttk.Button( button_frame, text="Cancel", command=self.dialog.destroy ).pack( side=tk.RIGHT )
@@ -1477,8 +1589,14 @@ class TagDialog:
             self.image_id = result[0]
             self.rating_var.set( result[1] or 0 )
             
-            # Get all tags
-            cursor.execute( "SELECT id, name FROM tags ORDER BY name" )
+            # Get only tags that are actually used by files in the database
+            cursor.execute( """
+                SELECT DISTINCT t.id, t.name 
+                FROM tags t 
+                INNER JOIN image_tags it ON t.id = it.tag_id 
+                INNER JOIN images i ON it.image_id = i.id 
+                ORDER BY t.name
+            """ )
             all_tags = cursor.fetchall()
             
             # Get current image tags
@@ -1489,16 +1607,26 @@ class TagDialog:
             ''', (self.image_id,) )
             current_tags = {row[0] for row in cursor.fetchall()}
             
-            # Populate listbox
-            self.tag_data = {}
-            for tag_id, tag_name in all_tags:
-                index = self.tag_listbox.size()
-                display_text = f"✓ {tag_name}" if tag_name in current_tags else f"  {tag_name}"
-                self.tag_listbox.insert( tk.END, display_text )
-                self.tag_data[index] = (tag_id, tag_name, tag_name in current_tags)
+            # Clear existing checkboxes
+            for widget in self.tag_scrollable_frame.winfo_children():
+                widget.destroy()
                 
-                if tag_name in current_tags:
-                    self.tag_listbox.selection_set( index )
+            # Create checkboxes for each tag
+            self.tag_checkboxes = {}
+            for i, (tag_id, tag_name) in enumerate( all_tags ):
+                tag_var = tk.BooleanVar( value=tag_name in current_tags )
+                
+                tag_frame = ttk.Frame( self.tag_scrollable_frame )
+                tag_frame.pack( fill=tk.X, pady=1 )
+                
+                checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var )
+                checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                
+                self.tag_checkboxes[tag_id] = {
+                    'var': tag_var,
+                    'name': tag_name,
+                    'checkbox': checkbox
+                }
                     
             conn.close()
             
@@ -1519,10 +1647,8 @@ class TagDialog:
             cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (self.image_id,) )
             
             # Add selected existing tags
-            selected_indices = self.tag_listbox.curselection()
-            for index in selected_indices:
-                if index in self.tag_data:
-                    tag_id, tag_name, _ = self.tag_data[index]
+            for tag_id, tag_data in self.tag_checkboxes.items():
+                if tag_data['var'].get():
                     cursor.execute( "INSERT INTO image_tags (image_id, tag_id) VALUES (?, ?)", (self.image_id, tag_id) )
                     
             # Add new tags
@@ -1541,6 +1667,281 @@ class TagDialog:
                     # Link tag to image
                     cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", (self.image_id, tag_id) )
                     
+            conn.commit()
+            conn.close()
+            
+            self.dialog.destroy()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to save tags: {str(e)}" )
+
+class MultiTagDialog:
+    def __init__( self, parent, filepaths, database_path ):
+        self.filepaths = filepaths
+        self.database_path = database_path
+        self.filenames = [os.path.basename( fp ) for fp in filepaths]
+        
+        # Create dialog window
+        self.dialog = tk.Toplevel( parent )
+        self.dialog.title( f"Tags for {len(filepaths)} images" )
+        self.dialog.geometry( "550x700" )
+        self.dialog.transient( parent )
+        self.dialog.grab_set()
+        
+        # Center the dialog
+        self.dialog.geometry( "+%d+%d" % (parent.winfo_rootx() + 50, parent.winfo_rooty() + 50) )
+        
+        self.setup_dialog()
+        self.load_tags()
+        
+    def setup_dialog( self ):
+        """Setup the multi-tag dialog interface"""
+        # File list section
+        files_frame = ttk.LabelFrame( self.dialog, text=f"Selected Files ({len(self.filepaths)})" )
+        files_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        files_listbox = tk.Listbox( files_frame, height=4 )
+        files_scrollbar = ttk.Scrollbar( files_frame, orient=tk.VERTICAL, command=files_listbox.yview )
+        files_listbox.configure( yscrollcommand=files_scrollbar.set )
+        
+        for filename in self.filenames:
+            files_listbox.insert( tk.END, filename )
+            
+        files_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        files_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Existing tags section (fixed height to ensure buttons remain visible)
+        existing_frame = ttk.LabelFrame( self.dialog, text="Existing Tags" )
+        existing_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        # Scrollable frame for tag checkboxes with fixed height
+        tag_canvas_frame = ttk.Frame( existing_frame )
+        tag_canvas_frame.pack( fill=tk.X, pady=5 )
+        
+        self.tag_canvas = tk.Canvas( tag_canvas_frame, height=250 )
+        tag_scrollbar = ttk.Scrollbar( tag_canvas_frame, orient=tk.VERTICAL, command=self.tag_canvas.yview )
+        self.tag_scrollable_frame = ttk.Frame( self.tag_canvas )
+        
+        self.tag_scrollable_frame.bind( "<Configure>", lambda e: self.tag_canvas.configure( scrollregion=self.tag_canvas.bbox( "all" ) ) )
+        self.tag_canvas.create_window( (0, 0), window=self.tag_scrollable_frame, anchor="nw" )
+        self.tag_canvas.configure( yscrollcommand=tag_scrollbar.set )
+        
+        self.tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Enable mouse wheel scrolling
+        def on_canvas_scroll( event ):
+            self.tag_canvas.yview_scroll( int( -1 * (event.delta / 120) ), "units" )
+        self.tag_canvas.bind( "<MouseWheel>", on_canvas_scroll )
+        
+        # New tags section
+        new_frame = ttk.LabelFrame( self.dialog, text="Add New Tags" )
+        new_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        ttk.Label( new_frame, text="Enter new tags (comma-separated):" ).pack( anchor=tk.W )
+        self.new_tags_entry = tk.Entry( new_frame, width=50 )
+        self.new_tags_entry.pack( fill=tk.X, pady=5 )
+        
+        # Rating section
+        rating_frame = ttk.LabelFrame( self.dialog, text="Rating (1-10)" )
+        rating_frame.pack( fill=tk.X, padx=10, pady=5 )
+        
+        self.rating_var = tk.IntVar( value=0 )
+        self.rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.rating_var )
+        self.rating_scale.pack( fill=tk.X )
+        
+        # Buttons (always visible at bottom)
+        button_frame = ttk.Frame( self.dialog )
+        button_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=10, pady=10 )
+        
+        ttk.Button( button_frame, text="Save", command=self.save_tags ).pack( side=tk.RIGHT, padx=5 )
+        ttk.Button( button_frame, text="Cancel", command=self.dialog.destroy ).pack( side=tk.RIGHT )
+        
+    def load_tags( self ):
+        """Load existing tags and analyze common/partial tags across selected images"""
+        try:
+            conn = sqlite3.connect( self.database_path )
+            cursor = conn.cursor()
+            
+            # Get image IDs and their ratings
+            self.image_data = {}
+            ratings = []
+            
+            for filepath in self.filepaths:
+                relative_path = os.path.relpath( filepath, os.path.dirname( self.database_path ) )
+                cursor.execute( "SELECT id, rating FROM images WHERE relative_path = ?", (relative_path,) )
+                result = cursor.fetchone()
+                
+                if result:
+                    self.image_data[filepath] = {'id': result[0], 'rating': result[1] or 0}
+                    ratings.append( result[1] or 0 )
+                    
+            # Handle ratings
+            if ratings:
+                unique_ratings = set( ratings )
+                if len( unique_ratings ) == 1:
+                    # All images have same rating
+                    self.rating_var.set( ratings[0] )
+                else:
+                    # Different ratings - grey out scale
+                    self.rating_scale.configure( state='disabled', bg='lightgrey' )
+                    self.rating_var.set( 0 )
+                    
+            # Get only tags that are actually used by files in the database
+            cursor.execute( """
+                SELECT DISTINCT t.id, t.name 
+                FROM tags t 
+                INNER JOIN image_tags it ON t.id = it.tag_id 
+                INNER JOIN images i ON it.image_id = i.id 
+                ORDER BY t.name
+            """ )
+            all_tags = cursor.fetchall()
+            
+            # For each tag, count how many selected images have it
+            tag_counts = {}
+            total_images = len( [img for img in self.image_data.values()] )
+            
+            for tag_id, tag_name in all_tags:
+                cursor.execute( '''
+                    SELECT COUNT(*) FROM image_tags it 
+                    WHERE it.tag_id = ? AND it.image_id IN ({})
+                '''.format( ','.join( ['?'] * len( self.image_data ) ) ), 
+                [tag_id] + [img['id'] for img in self.image_data.values()] )
+                
+                count = cursor.fetchone()[0]
+                tag_counts[tag_name] = count
+                
+            # Clear existing checkboxes
+            for widget in self.tag_scrollable_frame.winfo_children():
+                widget.destroy()
+                
+            # Create checkboxes with visual indicators
+            self.tag_checkboxes = {}
+            for tag_id, tag_name in all_tags:
+                count = tag_counts[tag_name]
+                
+                tag_frame = ttk.Frame( self.tag_scrollable_frame )
+                tag_frame.pack( fill=tk.X, pady=1 )
+                
+                if count == total_images:
+                    # All images have this tag - normal checked checkbox
+                    tag_var = tk.BooleanVar( value=True )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'common',
+                        'frame': tag_frame
+                    }
+                elif count > 0:
+                    # Some images have this tag - greyed out checkbox
+                    tag_var = tk.BooleanVar( value=False )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var, 
+                                             fg='grey', selectcolor='lightgrey',
+                                             command=lambda tid=tag_id: self.on_partial_checkbox_clicked( tid ) )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'partial',
+                        'frame': tag_frame
+                    }
+                else:
+                    # No images have this tag - normal unchecked checkbox
+                    tag_var = tk.BooleanVar( value=False )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'none',
+                        'frame': tag_frame
+                    }
+                    
+            conn.close()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to load tags: {str(e)}" )
+            self.dialog.destroy()
+            
+    def on_partial_checkbox_clicked( self, tag_id ):
+        """Handle clicking on a greyed out (partial) checkbox"""
+        if tag_id in self.tag_checkboxes and self.tag_checkboxes[tag_id]['state'] == 'partial':
+            tag_data = self.tag_checkboxes[tag_id]
+            tag_name = tag_data['name']
+            tag_frame = tag_data['frame']
+            current_value = tag_data['var'].get()
+            
+            # Destroy the old greyed checkbox
+            tag_data['checkbox'].destroy()
+            
+            # Create a new normal checkbox with the current state
+            new_var = tk.BooleanVar( value=current_value )
+            new_checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=new_var )
+            new_checkbox.pack( side=tk.LEFT, anchor=tk.W )
+            
+            # Update the stored data
+            self.tag_checkboxes[tag_id] = {
+                'var': new_var,
+                'name': tag_name,
+                'checkbox': new_checkbox,
+                'state': 'common' if current_value else 'none',
+                'frame': tag_frame
+            }
+            
+    def save_tags( self ):
+        """Save tag changes for all selected images"""
+        try:
+            conn = sqlite3.connect( self.database_path )
+            cursor = conn.cursor()
+            
+            # Update ratings if scale is enabled
+            if self.rating_scale['state'] != 'disabled':
+                rating = self.rating_var.get()
+                for img_data in self.image_data.values():
+                    cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (rating, img_data['id']) )
+            
+            # Get selected tags from checkboxes
+            selected_tag_ids = []
+            for tag_id, tag_data in self.tag_checkboxes.items():
+                if tag_data['var'].get():
+                    selected_tag_ids.append( tag_id )
+            
+            # Update tags for all images
+            for img_data in self.image_data.values():
+                image_id = img_data['id']
+                
+                # Clear existing tags for this image
+                cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (image_id,) )
+                
+                # Add selected tags
+                for tag_id in selected_tag_ids:
+                    cursor.execute( "INSERT INTO image_tags (image_id, tag_id) VALUES (?, ?)", (image_id, tag_id) )
+            
+            # Add new tags
+            new_tags_text = self.new_tags_entry.get().strip()
+            if new_tags_text:
+                new_tags = [tag.strip() for tag in new_tags_text.split( ',' ) if tag.strip()]
+                
+                for tag_name in new_tags:
+                    # Insert tag if it doesn't exist
+                    cursor.execute( "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,) )
+                    
+                    # Get tag ID
+                    cursor.execute( "SELECT id FROM tags WHERE name = ?", (tag_name,) )
+                    tag_id = cursor.fetchone()[0]
+                    
+                    # Link tag to all selected images
+                    for img_data in self.image_data.values():
+                        cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", (img_data['id'], tag_id) )
+            
             conn.commit()
             conn.close()
             

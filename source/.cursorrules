@@ -1,0 +1,14 @@
+# Cursor Rules for Image Viewer Project
+
+## Git Workflow Preferences
+- NEVER commit changes without explicit user request
+- Always let the user test functionality before committing
+- User prefers to test all changes thoroughly before git commits
+- Only stage and commit when user specifically asks to commit
+
+## Code Style Preferences  
+- No space between keywords/function names and opening parenthesis
+- One space after opening parenthesis and one space before closing parenthesis
+- Exception: type casts have no spaces around text within parentheses
+- Remove spaces between parentheses of the same direction
+- Retain parentheses formatting when providing code suggestions
