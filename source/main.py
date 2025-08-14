@@ -11,6 +11,7 @@ import os
 from PIL import Image, ImageTk
 import threading
 from pathlib import Path
+import json
 
 class ImageViewer:
     def __init__( self, root ):
@@ -29,12 +30,20 @@ class ImageViewer:
         self.previous_tab = None
         self.current_browse_image = None
         self.current_database_image = None
+        self.browse_folder_images = []
+        self.browse_image_index = 0
+        self.settings_file = "settings.json"
+        self.current_browse_directory = None
         
         # Supported image formats
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
         
         self.setup_ui()
         self.setup_database_menu()
+        self.load_settings()
+        
+        # Bind window close event to save settings
+        self.root.protocol( "WM_DELETE_WINDOW", self.on_closing )
         
     def setup_ui( self ):
         """Initialize the main user interface"""
@@ -81,8 +90,9 @@ class ImageViewer:
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
         
-        # Bind double-click event to preview label
+        # Bind double-click and mouse wheel events to preview label
         self.browse_preview_label.bind( "<Double-Button-1>", self.on_browse_preview_double_click )
+        self.browse_preview_label.bind( "<MouseWheel>", self.on_browse_preview_scroll )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -120,8 +130,7 @@ class ImageViewer:
         self.browse_tree.bind( "<Double-1>", self.on_browse_tree_double_click )
         self.browse_tree.bind( "<Button-3>", self.on_browse_tree_right_click )
         
-        # Load initial directory
-        self.load_directory_tree()
+        # Initial directory will be loaded after settings are loaded
         
     def setup_database_tab( self ):
         """Setup the Database tab interface"""
@@ -225,8 +234,82 @@ class ImageViewer:
         
         try:
             self.populate_tree( "", start_path )
+            self.current_browse_directory = start_path
         except PermissionError:
             messagebox.showerror( "Error", f"Permission denied accessing {start_path}" )
+            
+    def load_directory_tree_and_expand( self, target_directory ):
+        """Load directory tree from drive root and expand to target directory"""
+        # Get the drive root
+        drive = os.path.splitdrive( target_directory )[0] + "\\"
+        
+        # Load tree from drive root
+        self.load_directory_tree( drive )
+        
+        # Expand tree to target directory
+        self.expand_tree_to_path( target_directory )
+        
+    def expand_tree_to_path( self, target_path ):
+        """Expand tree nodes to show the target path"""
+        # Normalize the path
+        target_path = os.path.normpath( target_path )
+        drive = os.path.splitdrive( target_path )[0] + "\\"
+        
+        # Get path components relative to drive
+        relative_path = os.path.relpath( target_path, drive )
+        if relative_path == '.':
+            return  # Already at drive root
+            
+        path_parts = relative_path.split( os.sep )
+        current_path = drive
+        current_item = ""
+        
+        # Find and expand each part of the path
+        for part in path_parts:
+            current_path = os.path.join( current_path, part )
+            
+            # Find the tree item for this path component
+            if current_item == "":
+                # Looking in root level
+                children = self.browse_tree.get_children()
+            else:
+                # Looking in current item's children
+                children = self.browse_tree.get_children( current_item )
+                
+            # Find the matching child
+            found_item = None
+            for child in children:
+                child_path = self.browse_tree.item( child )['values'][0]
+                if os.path.normpath( child_path ) == os.path.normpath( current_path ):
+                    found_item = child
+                    break
+                    
+            if found_item:
+                # Expand this item if it's a directory
+                if os.path.isdir( current_path ):
+                    self.browse_tree.item( found_item, open=True )
+                    # Trigger expansion to load children
+                    self.on_tree_expand_for_path( found_item )
+                    
+                current_item = found_item
+                
+                # If this is the final target, select it
+                if os.path.normpath( current_path ) == os.path.normpath( target_path ):
+                    self.browse_tree.selection_set( found_item )
+                    self.browse_tree.focus( found_item )
+                    self.browse_tree.see( found_item )
+            else:
+                break  # Path not found, stop expanding
+                
+    def on_tree_expand_for_path( self, item ):
+        """Expand tree item for path navigation (similar to on_tree_expand but without event)"""
+        children = self.browse_tree.get_children( item )
+        
+        if len( children ) == 1 and self.browse_tree.item( children[0] )['text'] == "Loading...":
+            # Remove dummy child and populate real children
+            self.browse_tree.delete( children[0] )
+            path = self.browse_tree.item( item )['values'][0]
+            self.populate_tree( item, path )
             
     def populate_tree( self, parent, path ):
         """Recursively populate the directory tree"""
@@ -274,7 +357,15 @@ class ImageViewer:
             
             if self.is_image_file( filepath ):
                 self.current_browse_image = filepath
+                self.current_browse_directory = os.path.dirname( filepath )
+                self.update_browse_folder_images( filepath )
                 self.display_image_preview( filepath, self.browse_preview_label )
+                # Save the directory containing the selected image
+                self.save_current_directory( self.current_browse_directory )
+            elif os.path.isdir( filepath ):
+                # User selected a directory
+                self.current_browse_directory = filepath
+                self.save_current_directory( filepath )
                 
     def on_browse_tree_double_click( self, event ):
         """Handle double click in browse tree"""
@@ -298,6 +389,46 @@ class ImageViewer:
         """Handle double click on browse preview image"""
         if self.current_browse_image and os.path.exists( self.current_browse_image ):
             self.enter_fullscreen_mode( self.current_browse_image )
+            
+    def update_browse_folder_images( self, selected_filepath ):
+        """Update the list of images in the current folder for preview scrolling"""
+        folder_path = os.path.dirname( selected_filepath )
+        self.browse_folder_images = []
+        
+        try:
+            # Get all image files in the folder
+            for file in sorted( os.listdir( folder_path ) ):
+                file_path = os.path.join( folder_path, file )
+                if self.is_image_file( file_path ):
+                    self.browse_folder_images.append( file_path )
+                    
+            # Set current index
+            if selected_filepath in self.browse_folder_images:
+                self.browse_image_index = self.browse_folder_images.index( selected_filepath )
+            else:
+                self.browse_image_index = 0
+                
+        except OSError:
+            self.browse_folder_images = [selected_filepath] if selected_filepath else []
+            self.browse_image_index = 0
+            
+    def on_browse_preview_scroll( self, event ):
+        """Handle mouse wheel scrolling over browse preview image"""
+        if not self.browse_folder_images:
+            return
+            
+        if event.delta > 0:
+            # Scroll up - previous image (don't wrap)
+            if self.browse_image_index > 0:
+                self.browse_image_index -= 1
+                self.current_browse_image = self.browse_folder_images[self.browse_image_index]
+                self.display_image_preview( self.current_browse_image, self.browse_preview_label )
+        else:
+            # Scroll down - next image (don't wrap)
+            if self.browse_image_index < len( self.browse_folder_images ) - 1:
+                self.browse_image_index += 1
+                self.current_browse_image = self.browse_folder_images[self.browse_image_index]
+                self.display_image_preview( self.current_browse_image, self.browse_preview_label )
                 
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
@@ -777,6 +908,58 @@ class ImageViewer:
         
         # Refresh views after tag changes
         self.refresh_database_view()
+        
+    def load_settings( self ):
+        """Load application settings from file"""
+        directory_loaded = False
+        
+        try:
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    
+                last_directory = settings.get( 'last_directory' )
+                if last_directory and os.path.exists( last_directory ):
+                    # Set the drive dropdown to match the saved directory
+                    drive = os.path.splitdrive( last_directory )[0] + "\\"
+                    if hasattr( self, 'drive_var' ) and drive in self.drive_combo['values']:
+                        self.drive_var.set( drive )
+                    # Load the tree from drive root and expand to saved directory
+                    self.load_directory_tree_and_expand( last_directory )
+                    directory_loaded = True
+                    
+        except Exception as e:
+            print( f"Error loading settings: {e}" )
+            
+        # If no settings loaded or directory doesn't exist, use default
+        if not directory_loaded:
+            self.load_directory_tree()
+            
+    def save_current_directory( self, directory ):
+        """Save the current directory to settings"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    
+            settings['last_directory'] = directory
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+                
+        except Exception as e:
+            print( f"Error saving settings: {e}" )
+            
+    def on_closing( self ):
+        """Handle application closing"""
+        # Save current directory before closing
+        if self.current_browse_directory:
+            self.save_current_directory( self.current_browse_directory )
+        elif hasattr( self, 'drive_var' ) and self.drive_var.get():
+            self.save_current_directory( self.drive_var.get() )
+            
+        self.root.destroy()
 
 class TagDialog:
     def __init__( self, parent, filepath, database_path ):
