@@ -23,6 +23,7 @@ class ImageViewer:
         self.current_database = None
         self.current_database_path = None
         self.current_image = None
+        self.startup_complete = False  # Flag to prevent saving state during startup
         self.current_directory = None
         self.fullscreen_window = None
         self.fullscreen_images = []
@@ -42,8 +43,11 @@ class ImageViewer:
         self.setup_database_menu()
         self.load_settings()
         
-        # Restore window geometry after everything is set up
+        # Restore window geometry and active tab after everything is set up
         self.root.after( 100, self.restore_window_geometry )
+        self.root.after( 150, self.restore_active_tab )
+        # Mark startup as complete after all restoration is done
+        self.root.after( 200, self.complete_startup )
         
         # Bind window close event to save settings
         self.root.protocol( "WM_DELETE_WINDOW", self.on_closing )
@@ -870,6 +874,9 @@ class ImageViewer:
             self.refresh_database_view()
             # Restore paned positions when switching to database tab
             self.root.after( 100, self.restore_paned_positions )
+        
+        # Save the active tab state whenever it changes
+        self.save_active_tab_only()
             
     def create_database( self ):
         """Create a new database for a selected directory"""
@@ -1950,6 +1957,7 @@ class ImageViewer:
             settings['last_directory'] = directory
             self.save_paned_positions( settings )
             self.save_window_geometry( settings )
+            self.save_active_tab( settings )
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )
@@ -1958,7 +1966,7 @@ class ImageViewer:
             print( f"Error saving settings: {e}" )
     
     def save_directory_only( self, directory ):
-        """Save only the directory to settings without affecting window geometry"""
+        """Save only the directory to settings without affecting other settings"""
         try:
             settings = {}
             if os.path.exists( self.settings_file ):
@@ -1966,7 +1974,8 @@ class ImageViewer:
                     settings = json.load( f )
                     
             settings['last_directory'] = directory
-            # Don't call save_window_geometry here - only save directory
+            # Don't call save_window_geometry or save_active_tab here
+            # This method should only update the directory, preserving all other settings
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )
@@ -2040,6 +2049,37 @@ class ImageViewer:
         except Exception as e:
             print( f"Error saving window geometry: {e}" )
     
+    def save_active_tab( self, settings ):
+        """Save the currently active tab to settings"""
+        try:
+            # Get the currently selected tab
+            current_tab = self.notebook.index( self.notebook.select() )
+            tab_name = "browse" if current_tab == 0 else "database"
+            settings['active_tab'] = tab_name
+            
+        except Exception as e:
+            print( f"Error saving active tab: {e}" )
+    
+    def save_active_tab_only( self ):
+        """Save only the active tab state to settings (called when tab changes)"""
+        # Don't save tab state during startup
+        if not self.startup_complete:
+            return
+            
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            self.save_active_tab( settings )
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+                
+        except Exception as e:
+            print( f"Error saving active tab: {e}" )
+    
     def restore_paned_positions( self ):
         """Restore paned window positions from settings"""
         try:
@@ -2100,6 +2140,33 @@ class ImageViewer:
         except Exception as e:
             print( f"Error restoring window geometry: {e}" )
             self.set_default_window_geometry()
+    
+    def restore_active_tab( self ):
+        """Restore the active tab from settings"""
+        try:
+            if not os.path.exists( self.settings_file ):
+                return  # Default to browse tab (index 0)
+                
+            with open( self.settings_file, 'r' ) as f:
+                settings = json.load( f )
+            
+            if 'active_tab' not in settings:
+                return  # Default to browse tab
+                
+            active_tab = settings['active_tab']
+            if active_tab == "database":
+                self.notebook.select( 1 )  # Select database tab
+            else:
+                self.notebook.select( 0 )  # Select browse tab (default)
+                
+        except Exception as e:
+            print( f"Error restoring active tab: {e}" )
+            # Default to browse tab on error
+            self.notebook.select( 0 )
+    
+    def complete_startup( self ):
+        """Mark startup as complete to enable state saving"""
+        self.startup_complete = True
     
     def set_default_window_geometry( self ):
         """Set default window size and center it on screen"""
@@ -2193,7 +2260,7 @@ class ImageViewer:
 
     
     def save_paned_positions_only( self ):
-        """Save paned positions and window geometry to settings (called during resize)"""
+        """Save paned positions, window geometry, and tab state to settings (called during resize)"""
         try:
             settings = {}
             if os.path.exists( self.settings_file ):
@@ -2202,6 +2269,7 @@ class ImageViewer:
             
             self.save_paned_positions( settings )
             self.save_window_geometry( settings )
+            self.save_active_tab( settings )
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )
@@ -2211,12 +2279,15 @@ class ImageViewer:
             
     def on_closing( self ):
         """Handle application closing"""
-        # Save current directory before closing
+        # Save current directory and all state before closing
         if self.current_browse_directory:
             self.save_current_directory( self.current_browse_directory )
         elif hasattr( self, 'drive_var' ) and self.drive_var.get():
             self.save_current_directory( self.drive_var.get() )
-            
+        else:
+            # If no directory to save, still save other state (window, paned positions, active tab)
+            self.save_paned_positions_only()
+        
         self.root.destroy()
 
 class TagDialog:
