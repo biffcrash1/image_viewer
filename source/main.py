@@ -1083,8 +1083,8 @@ class ImageViewer:
                 )
             ''' )
             
-            # Scan directory for images
-            self.scan_directory_for_images( cursor, directory )
+            # Scan directory for images with progress tracking
+            self.scan_directory_for_images_with_progress( cursor, directory )
             
             conn.commit()
             conn.close()
@@ -1161,8 +1161,8 @@ class ImageViewer:
                 )
             ''' )
             
-            # Scan directory for images
-            self.scan_directory_for_images( cursor, directory )
+            # Scan directory for images with progress tracking
+            self.scan_directory_for_images_with_progress( cursor, directory )
             
             conn.commit()
             conn.close()
@@ -1243,8 +1243,8 @@ class ImageViewer:
                 )
             ''' )
             
-            # Scan directory for images
-            self.scan_directory_for_images( cursor, directory_path )
+            # Scan directory for images with progress tracking
+            self.scan_directory_for_images_with_progress( cursor, directory_path )
             
             conn.commit()
             conn.close()
@@ -1282,6 +1282,147 @@ class ImageViewer:
                         
                     except Exception as e:
                         print( f"Error processing {filepath}: {e}" )
+                        
+    def scan_directory_for_images_with_progress( self, cursor, directory ):
+        """Scan directory recursively for image files and add to database with progress reporting"""
+        # First pass: count total files for progress calculation
+        total_files = 0
+        all_image_files = []
+        
+        progress_dialog = self.create_progress_dialog( "Creating Database", "Scanning directory..." )
+        self.root.update()
+        
+        try:
+            # Count image files
+            for root, dirs, files in os.walk( directory ):
+                for file in files:
+                    filepath = os.path.join( root, file )
+                    if self.is_image_file( filepath ):
+                        all_image_files.append( filepath )
+                        total_files += 1
+                        
+            # Update progress dialog
+            progress_dialog['total'] = total_files
+            self.update_progress_dialog( progress_dialog, 0, total_files, "Processing images..." )
+            
+            # Second pass: process files with progress updates
+            processed = 0
+            for filepath in all_image_files:
+                if progress_dialog.get( 'cancelled', False ):
+                    raise Exception( "Operation cancelled by user" )
+                    
+                try:
+                    # Get image dimensions
+                    with Image.open( filepath ) as img:
+                        width, height = img.size
+                        
+                    # Calculate relative path
+                    relative_path = os.path.relpath( filepath, directory )
+                    filename = os.path.basename( filepath )
+                    
+                    # Insert into database
+                    cursor.execute( '''
+                        INSERT INTO images (filename, relative_path, width, height)
+                        VALUES (?, ?, ?, ?)
+                    ''', (filename, relative_path, width, height) )
+                    
+                except Exception as e:
+                    print( f"Error processing {filepath}: {e}" )
+                    
+                processed += 1
+                
+                # Update progress every 10 files or on last file
+                if processed % 10 == 0 or processed == total_files:
+                    self.update_progress_dialog( progress_dialog, processed, total_files, 
+                                               f"Processed {processed}/{total_files} images" )
+                    
+        finally:
+            self.close_progress_dialog( progress_dialog )
+    
+    def create_progress_dialog( self, title, message ):
+        """Create a progress dialog window"""
+        progress_window = tk.Toplevel( self.root )
+        progress_window.title( title )
+        progress_window.geometry( "400x150" )
+        progress_window.resizable( False, False )
+        progress_window.transient( self.root )
+        progress_window.grab_set()
+        
+        # Center the dialog
+        progress_window.geometry( "+%d+%d" % (
+            self.root.winfo_rootx() + 50,
+            self.root.winfo_rooty() + 50
+        ))
+        
+        # Message label
+        message_label = ttk.Label( progress_window, text=message )
+        message_label.pack( pady=10 )
+        
+        # Progress bar
+        progress_var = tk.DoubleVar()
+        progress_bar = ttk.Progressbar( progress_window, variable=progress_var, maximum=100 )
+        progress_bar.pack( pady=10, padx=20, fill=tk.X )
+        
+        # Status label
+        status_label = ttk.Label( progress_window, text="Initializing..." )
+        status_label.pack( pady=5 )
+        
+        # Cancel button
+        cancel_button = ttk.Button( progress_window, text="Cancel" )
+        cancel_button.pack( pady=10 )
+        
+        # Store dialog components
+        dialog_data = {
+            'window': progress_window,
+            'message_label': message_label,
+            'progress_var': progress_var,
+            'progress_bar': progress_bar,
+            'status_label': status_label,
+            'cancel_button': cancel_button,
+            'cancelled': False,
+            'total': 0
+        }
+        
+        # Bind cancel button
+        cancel_button.configure( command=lambda: self.cancel_progress_dialog( dialog_data ) )
+        
+        return dialog_data
+    
+    def update_progress_dialog( self, dialog_data, current, total, status_text ):
+        """Update progress dialog with current status"""
+        if dialog_data['cancelled']:
+            return
+            
+        try:
+            # Update progress bar
+            if total > 0:
+                percentage = (current / total) * 100
+                dialog_data['progress_var'].set( percentage )
+            
+            # Update status text
+            dialog_data['status_label'].configure( text=status_text )
+            
+            # Force GUI update
+            dialog_data['window'].update()
+            
+        except tk.TclError:
+            # Dialog was closed
+            pass
+    
+    def cancel_progress_dialog( self, dialog_data ):
+        """Mark progress dialog as cancelled"""
+        dialog_data['cancelled'] = True
+        dialog_data['status_label'].configure( text="Cancelling..." )
+        dialog_data['cancel_button'].configure( state='disabled' )
+        dialog_data['window'].update()
+    
+    def close_progress_dialog( self, dialog_data ):
+        """Close the progress dialog"""
+        try:
+            dialog_data['window'].destroy()
+        except tk.TclError:
+            # Dialog already closed
+            pass
                         
     def open_database( self ):
         """Open an existing database file"""
