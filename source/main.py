@@ -1093,9 +1093,10 @@ class ImageViewer:
             self.current_database = directory
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
-            self.update_recent_databases_dropdown()
             # Save the database state immediately
             self.save_paned_positions_only()
+            # Small delay to ensure settings are written
+            self.root.after(100, self.update_recent_databases_dropdown)
             
             messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
             
@@ -1170,9 +1171,10 @@ class ImageViewer:
             self.current_database = directory
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
-            self.update_recent_databases_dropdown()
             # Save the database state immediately
             self.save_paned_positions_only()
+            # Small delay to ensure settings are written
+            self.root.after(100, self.update_recent_databases_dropdown)
             
             messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
             
@@ -1313,9 +1315,10 @@ class ImageViewer:
             self.current_database = os.path.dirname( db_path )
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
-            self.update_recent_databases_dropdown()
             # Save the database state immediately
             self.save_paned_positions_only()
+            # Small delay to ensure settings are written
+            self.root.after(100, self.update_recent_databases_dropdown)
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to open database: {str(e)}" )
@@ -2488,20 +2491,35 @@ class ImageViewer:
             self.notebook.select( 0 )
     
     def on_recent_database_selected( self, event ):
-        """Handle selection from recent databases dropdown"""
-        # This method is called when user selects from dropdown
-        # The actual opening is handled by the "Open Selected" button
-        pass
+        """Handle selection from recent databases dropdown - open database immediately"""
+        self.open_selected_recent_database()
     
     def open_selected_recent_database( self ):
         """Open the database selected in the recent databases dropdown"""
-        selected_path = self.recent_databases_var.get()
-        if selected_path and os.path.exists( selected_path ):
-            self.open_database_file( selected_path )
-        elif selected_path:
-            messagebox.showerror( "Error", f"Database file not found: {selected_path}" )
-            # Remove the non-existent database from recent list
-            self.remove_from_recent_databases( selected_path )
+        selected_display = self.recent_databases_var.get()
+        if not selected_display:
+            return
+            
+        # Extract the full path from the display name format: "filename.db (directory)"
+        try:
+            # Parse the display format to get the actual path
+            if " (" in selected_display and selected_display.endswith( ")" ):
+                filename = selected_display.split( " (" )[0]
+                directory = selected_display.split( " (" )[1][:-1]  # Remove the closing parenthesis
+                selected_path = os.path.join( directory, filename )
+            else:
+                # Fallback - assume it's already a full path
+                selected_path = selected_display
+                
+            if os.path.exists( selected_path ):
+                self.open_database_file( selected_path )
+            else:
+                messagebox.showerror( "Error", f"Database file not found: {selected_path}" )
+                # Remove the non-existent database from recent list
+                self.remove_from_recent_databases( selected_path )
+                
+        except Exception as e:
+            messagebox.showerror( "Error", f"Error opening database: {str(e)}" )
     
     def remove_from_recent_databases( self, database_path ):
         """Remove a database from the recent databases list"""
@@ -2547,14 +2565,49 @@ class ImageViewer:
                 filename = os.path.basename( db_path )
                 display_values.append( f"{filename} ({os.path.dirname( db_path )})" )
             
-            # Update the dropdown values with full paths for functionality
-            self.recent_databases_combo['values'] = existing_databases
-            
-            # If we have databases, set the first one as default to show something
-            if existing_databases:
-                self.recent_databases_var.set( existing_databases[0] )
-            else:
-                self.recent_databases_var.set( '' )
+            # Try multiple approaches to force combobox refresh
+            try:
+                # Method 1: Clear and set values
+                self.recent_databases_combo['values'] = ()
+                self.recent_databases_combo['values'] = display_values
+                
+                # Method 2: Set the variable first, then force selection update
+                if display_values:
+                    self.recent_databases_var.set( display_values[0] )
+                    # Force the combobox to show the new value
+                    self.recent_databases_combo.selection_clear()
+                    self.recent_databases_combo.icursor(0)
+                else:
+                    self.recent_databases_var.set( '' )
+                
+                # Method 3: Force widget state change to trigger refresh
+                current_state = self.recent_databases_combo['state']
+                self.recent_databases_combo.configure(state='normal')
+                self.recent_databases_combo.configure(state=current_state)
+                
+                # Method 4: Force focus and update
+                self.recent_databases_combo.update_idletasks()
+                self.root.update_idletasks()
+                
+            except Exception as refresh_error:
+                print(f"Error in combobox refresh: {refresh_error}")
+                # Fallback: recreate the combobox if normal refresh fails
+                if hasattr(self, 'recent_databases_combo'):
+                    try:
+                        parent_frame = self.recent_databases_combo.master
+                        self.recent_databases_combo.destroy()
+                        
+                        self.recent_databases_combo = ttk.Combobox( parent_frame, textvariable=self.recent_databases_var, state="readonly", width=50 )
+                        self.recent_databases_combo.configure( values=display_values )
+                        self.recent_databases_combo.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+                        self.recent_databases_combo.bind( "<<ComboboxSelected>>", self.on_recent_database_selected )
+                        
+                        if display_values:
+                            self.recent_databases_var.set( display_values[0] )
+                        else:
+                            self.recent_databases_var.set( '' )
+                    except Exception as recreate_error:
+                        print(f"Error recreating combobox: {recreate_error}")
                 
         except Exception as e:
             print( f"Error updating recent databases dropdown: {e}" )
