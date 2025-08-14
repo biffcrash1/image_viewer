@@ -1325,9 +1325,12 @@ class ImageViewer:
             thread_data['current_files'] = all_image_files
             thread_data['phase'] = 'processing'
             
-            # Second pass: process files with progress updates
+            # Second pass: process files with batch inserts for better performance
             processed = 0
             successful = 0
+            batch_size = 200  # Process images in batches for better performance
+            batch_data = []
+            
             for filepath in all_image_files:
                 # Check for cancellation
                 if thread_data['progress_dialog'].get( 'cancelled', False ):
@@ -1343,23 +1346,33 @@ class ImageViewer:
                     relative_path = os.path.relpath( filepath, directory )
                     filename = os.path.basename( filepath )
                     
-                    # Insert into database
-                    cursor.execute( '''
-                        INSERT INTO images (filename, relative_path, width, height)
-                        VALUES (?, ?, ?, ?)
-                    ''', (filename, relative_path, width, height) )
-                    
+                    # Add to batch
+                    batch_data.append( (filename, relative_path, width, height) )
                     successful += 1
                     
                 except Exception as e:
                     print( f"Error processing {filepath}: {e}" )
                     
                 processed += 1
+                
+                # Process batch when it reaches batch_size or at the end
+                if len( batch_data ) >= batch_size or processed == total_files:
+                    if batch_data:
+                        # Batch insert for better performance
+                        cursor.executemany( '''
+                            INSERT INTO images (filename, relative_path, width, height)
+                            VALUES (?, ?, ?, ?)
+                        ''', batch_data )
+                        
+                        # Commit batch
+                        conn.commit()
+                        
+                        # Clear batch
+                        batch_data = []
+                
+                # Update progress
                 thread_data['processed'] = processed
                 thread_data['successful'] = successful
-            
-            # Commit all changes
-            conn.commit()
                     
         except Exception as e:
             thread_data['exception'] = e
@@ -1635,8 +1648,11 @@ class ImageViewer:
             cursor.execute( "SELECT id, relative_path FROM images" )
             db_images = {row[1]: row[0] for row in cursor.fetchall()}
             
-            # Scan directory for current images
+            # Scan directory for current images and collect new ones for batch processing
             current_images = set()
+            new_images_batch = []
+            images_to_delete = []
+            
             for root, dirs, files in os.walk( self.current_database ):
                 for file in files:
                     filepath = os.path.join( root, file )
@@ -1644,24 +1660,34 @@ class ImageViewer:
                         relative_path = os.path.relpath( filepath, self.current_database )
                         current_images.add( relative_path )
                         
-                        # Add new images
+                        # Collect new images for batch processing
                         if relative_path not in db_images:
                             try:
                                 with Image.open( filepath ) as img:
                                     width, height = img.size
                                     
-                                cursor.execute( '''
-                                    INSERT INTO images (filename, relative_path, width, height)
-                                    VALUES (?, ?, ?, ?)
-                                ''', (file, relative_path, width, height) )
+                                new_images_batch.append( (file, relative_path, width, height) )
                             except Exception as e:
-                                print( f"Error adding {filepath}: {e}" )
+                                print( f"Error processing {filepath}: {e}" )
                                 
-            # Remove images that no longer exist
+            # Batch insert new images
+            if new_images_batch:
+                cursor.executemany( '''
+                    INSERT INTO images (filename, relative_path, width, height)
+                    VALUES (?, ?, ?, ?)
+                ''', new_images_batch )
+                                
+            # Collect images to delete for batch processing
             for relative_path, image_id in db_images.items():
                 if relative_path not in current_images:
-                    cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (image_id,) )
-                    cursor.execute( "DELETE FROM images WHERE id = ?", (image_id,) )
+                    images_to_delete.append( (image_id,) )
+                    
+            # Batch delete images that no longer exist
+            if images_to_delete:
+                # Delete associated tags first
+                cursor.executemany( "DELETE FROM image_tags WHERE image_id = ?", images_to_delete )
+                # Then delete images
+                cursor.executemany( "DELETE FROM images WHERE id = ?", images_to_delete )
                     
             conn.commit()
             conn.close()
@@ -2154,15 +2180,17 @@ class ImageViewer:
                 return
                 
             # Apply the tag change
-            for image_id in image_ids:
-                if is_checked:
-                    # Add tag to image
-                    cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
-                                  (image_id, tag_id) )
-                else:
-                    # Remove tag from image
-                    cursor.execute( "DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?", 
-                                  (image_id, tag_id) )
+            # Apply tag changes to all selected images using batch operations
+            if is_checked:
+                # Batch add tag to images
+                batch_data = [(image_id, tag_id) for image_id in image_ids]
+                cursor.executemany( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
+                                  batch_data )
+            else:
+                # Batch remove tag from images
+                batch_data = [(image_id, tag_id) for image_id in image_ids]
+                cursor.executemany( "DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?", 
+                                  batch_data )
             
             conn.commit()
             conn.close()
@@ -2260,18 +2288,19 @@ class ImageViewer:
             if new_tags_text:
                 new_tags = [tag.strip() for tag in new_tags_text.split( ',' ) if tag.strip()]
                 
+                # Batch insert new tags
+                tag_batch = [(tag_name,) for tag_name in new_tags]
+                cursor.executemany( "INSERT OR IGNORE INTO tags (name) VALUES (?)", tag_batch )
+                
                 for tag_name in new_tags:
-                    # Insert tag if it doesn't exist
-                    cursor.execute( "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,) )
-                    
                     # Get tag ID
                     cursor.execute( "SELECT id FROM tags WHERE name = ?", (tag_name,) )
                     tag_id = cursor.fetchone()[0]
                     
-                    # Add tag to all selected images
-                    for img_data in image_data.values():
-                        cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
-                                      (img_data['id'], tag_id) )
+                    # Batch add tag to all selected images
+                    image_tag_batch = [(img_data['id'], tag_id) for img_data in image_data.values()]
+                    cursor.executemany( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
+                                      image_tag_batch )
                 changes_made = True
             
             if changes_made:
