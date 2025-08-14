@@ -137,7 +137,14 @@ class ImageViewer:
         """Setup the Database tab interface"""
         # Database name header
         self.database_name_label = ttk.Label( self.database_frame, text="No database open", font=('TkDefaultFont', 10, 'bold') )
-        self.database_name_label.pack( pady=(5, 10) )
+        self.database_name_label.pack( pady=(5, 5) )
+        
+        # Database action buttons
+        button_frame = ttk.Frame( self.database_frame )
+        button_frame.pack( fill=tk.X, padx=10, pady=(0, 10) )
+        
+        ttk.Button( button_frame, text="Open Database", command=self.open_database ).pack( side=tk.LEFT, padx=(0, 5) )
+        ttk.Button( button_frame, text="Create Database", command=self.create_database ).pack( side=tk.LEFT, padx=5 )
         
         # Create paned window for two columns
         paned = ttk.PanedWindow( self.database_frame, orient=tk.HORIZONTAL )
@@ -158,9 +165,28 @@ class ImageViewer:
         right_frame = ttk.Frame( paned )
         paned.add( right_frame, weight=2 )
         
-        # Tag filter section
-        tag_frame = ttk.LabelFrame( right_frame, text="Tag Filters" )
-        tag_frame.pack( fill=tk.X, padx=5, pady=5 )
+        # Top section - Split into Tag Filters and Image Tags
+        top_section = ttk.Frame( right_frame )
+        top_section.pack( fill=tk.X, padx=5, pady=5 )
+        
+        # Left side - Tag filter section
+        tag_frame = ttk.LabelFrame( top_section, text="Tag Filters" )
+        tag_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2) )
+        
+        # Right side - Image Tags section
+        image_tags_frame = ttk.LabelFrame( top_section, text="Image Tags" )
+        image_tags_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0) )
+        
+        # Image tags listbox with scrollbar
+        image_tags_list_frame = ttk.Frame( image_tags_frame )
+        image_tags_list_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        
+        self.image_tags_listbox = tk.Listbox( image_tags_list_frame, height=6 )
+        image_tags_scrollbar = ttk.Scrollbar( image_tags_list_frame, orient=tk.VERTICAL, command=self.image_tags_listbox.yview )
+        self.image_tags_listbox.configure( yscrollcommand=image_tags_scrollbar.set )
+        
+        self.image_tags_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        image_tags_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
         
         # Create frame for tag filter with proper grid layout
         tag_filter_frame = ttk.Frame( tag_frame )
@@ -933,10 +959,10 @@ class ImageViewer:
         if not self.current_database_path:
             # Clear the view when no database is open
             self.database_name_label.configure( text="No database open" )
-            self.tag_listbox.delete( 0, tk.END )
             self.database_image_listbox.delete( 0, tk.END )
             self.database_preview_label.configure( image="", text="No database open" )
             self.database_preview_label.image = None
+            self.image_tags_listbox.delete( 0, tk.END )
             return
             
         try:
@@ -1055,6 +1081,7 @@ class ImageViewer:
             if filepath:
                 self.current_database_image = filepath
                 self.display_image_preview( filepath, self.database_preview_label )
+                self.display_image_tags( filename )
                 
     def on_database_image_double_click( self, event ):
         """Handle double click in database image list"""
@@ -1104,6 +1131,55 @@ class ImageViewer:
             print( f"Error finding image path: {e}" )
             
         return None
+        
+    def display_image_tags( self, filename ):
+        """Display tags for the selected image in the Image Tags frame"""
+        self.image_tags_listbox.delete( 0, tk.END )
+        
+        if not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image ID and tags
+            cursor.execute( '''
+                SELECT i.id, t.name, i.rating
+                FROM images i
+                LEFT JOIN image_tags it ON i.id = it.image_id
+                LEFT JOIN tags t ON it.tag_id = t.id
+                WHERE i.filename = ?
+                ORDER BY t.name
+            ''', (filename,) )
+            
+            results = cursor.fetchall()
+            conn.close()
+            
+            if results:
+                # Get rating (same for all rows)
+                rating = results[0][2] or 0
+                
+                # Add rating to the list
+                self.image_tags_listbox.insert( tk.END, f"Rating: {rating}/10" )
+                
+                # Add separator
+                self.image_tags_listbox.insert( tk.END, "─────────────" )
+                
+                # Add tags
+                tags_found = False
+                for row in results:
+                    if row[1]:  # If tag name exists
+                        self.image_tags_listbox.insert( tk.END, row[1] )
+                        tags_found = True
+                        
+                if not tags_found:
+                    self.image_tags_listbox.insert( tk.END, "(no tags)" )
+            else:
+                self.image_tags_listbox.insert( tk.END, "(image not in database)" )
+                
+        except Exception as e:
+            self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
         
     def on_all_include_changed( self ):
         """Handle 'all' include checkbox change"""
