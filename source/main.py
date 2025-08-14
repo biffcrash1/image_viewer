@@ -193,21 +193,23 @@ class ImageViewer:
         tag_filter_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
         
         # Configure grid columns with fixed widths
-        tag_filter_frame.grid_columnconfigure( 0, minsize=60 )  # Include column
-        tag_filter_frame.grid_columnconfigure( 1, minsize=60 )  # Exclude column  
-        tag_filter_frame.grid_columnconfigure( 2, weight=1 )    # Tag name column
+        tag_filter_frame.grid_columnconfigure( 0, minsize=80 )  # Include (OR) column
+        tag_filter_frame.grid_columnconfigure( 1, minsize=80 )  # Include (AND) column
+        tag_filter_frame.grid_columnconfigure( 2, minsize=60 )  # Exclude column  
+        tag_filter_frame.grid_columnconfigure( 3, weight=1 )    # Tag name column
         
         # Headers
-        ttk.Label( tag_filter_frame, text="Include" ).grid( row=0, column=0, sticky="w", padx=5, pady=2 )
-        ttk.Label( tag_filter_frame, text="Exclude" ).grid( row=0, column=1, sticky="w", padx=5, pady=2 )
-        ttk.Label( tag_filter_frame, text="Tag Name" ).grid( row=0, column=2, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Include (OR)" ).grid( row=0, column=0, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Include (AND)" ).grid( row=0, column=1, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Exclude" ).grid( row=0, column=2, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Tag Name" ).grid( row=0, column=3, sticky="w", padx=5, pady=2 )
         
         # Separator line
-        ttk.Separator( tag_filter_frame, orient='horizontal' ).grid( row=1, column=0, columnspan=3, sticky="ew", pady=2 )
+        ttk.Separator( tag_filter_frame, orient='horizontal' ).grid( row=1, column=0, columnspan=4, sticky="ew", pady=2 )
         
         # Scrollable frame for tag rows
         canvas_frame = ttk.Frame( tag_filter_frame )
-        canvas_frame.grid( row=2, column=0, columnspan=3, sticky="nsew", pady=5 )
+        canvas_frame.grid( row=2, column=0, columnspan=4, sticky="nsew", pady=5 )
         tag_filter_frame.grid_rowconfigure( 2, weight=1 )
         
         self.tag_canvas = tk.Canvas( canvas_frame, height=150 )
@@ -220,9 +222,10 @@ class ImageViewer:
         self.tag_canvas.configure( yscrollcommand=tag_scrollbar.set )
         
         # Configure scrollable frame columns to match parent
-        self.tag_scrollable_frame.grid_columnconfigure( 0, minsize=60 )
-        self.tag_scrollable_frame.grid_columnconfigure( 1, minsize=60 )
-        self.tag_scrollable_frame.grid_columnconfigure( 2, weight=1 )
+        self.tag_scrollable_frame.grid_columnconfigure( 0, minsize=80 )  # Include (OR)
+        self.tag_scrollable_frame.grid_columnconfigure( 1, minsize=80 )  # Include (AND)
+        self.tag_scrollable_frame.grid_columnconfigure( 2, minsize=60 )  # Exclude
+        self.tag_scrollable_frame.grid_columnconfigure( 3, weight=1 )    # Tag name
         
         self.tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
         tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
@@ -254,10 +257,12 @@ class ImageViewer:
         self.database_image_listbox.bind( "<Button-3>", self.on_database_image_right_click )
         
         # Initialize tag filters and checkbox tracking
-        self.included_tags = set()
+        self.included_or_tags = set()
+        self.included_and_tags = set()
         self.excluded_tags = set()
         self.tag_checkboxes = {}  # Dictionary to store checkbox variables
-        self.all_include_var = tk.BooleanVar()
+        self.all_include_or_var = tk.BooleanVar()
+        self.all_include_and_var = tk.BooleanVar()
         self.all_exclude_var = tk.BooleanVar()
         
     def populate_drives( self ):
@@ -985,34 +990,43 @@ class ImageViewer:
             
             # Create "all" pseudo tag row
             row = 0
-            all_include_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_include_var, command=self.on_all_include_changed )
-            all_include_cb.grid( row=row, column=0, sticky="w", padx=5, pady=1 )
+            all_include_or_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_include_or_var, command=self.on_all_include_or_changed )
+            all_include_or_cb.grid( row=row, column=0, sticky="w", padx=5, pady=1 )
+            
+            all_include_and_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_include_and_var, command=self.on_all_include_and_changed )
+            all_include_and_cb.grid( row=row, column=1, sticky="w", padx=5, pady=1 )
             
             all_exclude_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_exclude_var, command=self.on_all_exclude_changed )
-            all_exclude_cb.grid( row=row, column=1, sticky="w", padx=5, pady=1 )
+            all_exclude_cb.grid( row=row, column=2, sticky="w", padx=5, pady=1 )
             
-            ttk.Label( self.tag_scrollable_frame, text="all", font=('TkDefaultFont', 9, 'italic') ).grid( row=row, column=2, sticky="w", padx=5, pady=1 )
+            ttk.Label( self.tag_scrollable_frame, text="all", font=('TkDefaultFont', 9, 'italic') ).grid( row=row, column=3, sticky="w", padx=5, pady=1 )
             
             # Create checkbox rows for each tag
             for i, tag in enumerate( tags, start=1 ):
                 # Create variables for this tag
-                include_var = tk.BooleanVar()
+                include_or_var = tk.BooleanVar()
+                include_and_var = tk.BooleanVar()
                 exclude_var = tk.BooleanVar()
                 
                 # Create checkboxes directly in scrollable frame
-                include_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=include_var, command=lambda t=tag: self.on_tag_include_changed( t ) )
-                include_cb.grid( row=i, column=0, sticky="w", padx=5, pady=1 )
+                include_or_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=include_or_var, command=lambda t=tag: self.on_tag_include_or_changed( t ) )
+                include_or_cb.grid( row=i, column=0, sticky="w", padx=5, pady=1 )
+                
+                include_and_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=include_and_var, command=lambda t=tag: self.on_tag_include_and_changed( t ) )
+                include_and_cb.grid( row=i, column=1, sticky="w", padx=5, pady=1 )
                 
                 exclude_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=exclude_var, command=lambda t=tag: self.on_tag_exclude_changed( t ) )
-                exclude_cb.grid( row=i, column=1, sticky="w", padx=5, pady=1 )
+                exclude_cb.grid( row=i, column=2, sticky="w", padx=5, pady=1 )
                 
-                ttk.Label( self.tag_scrollable_frame, text=tag ).grid( row=i, column=2, sticky="w", padx=5, pady=1 )
+                ttk.Label( self.tag_scrollable_frame, text=tag ).grid( row=i, column=3, sticky="w", padx=5, pady=1 )
                 
                 # Store checkbox variables
                 self.tag_checkboxes[tag] = {
-                    'include_var': include_var,
+                    'include_or_var': include_or_var,
+                    'include_and_var': include_and_var,
                     'exclude_var': exclude_var,
-                    'include_cb': include_cb,
+                    'include_or_cb': include_or_cb,
+                    'include_and_cb': include_and_cb,
                     'exclude_cb': exclude_cb
                 }
                 
@@ -1033,29 +1047,43 @@ class ImageViewer:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
-            # Build query based on filters
-            query = "SELECT DISTINCT i.relative_path, i.filename FROM images i"
-            params = []
-            
-            if self.included_tags or self.excluded_tags:
-                query += " LEFT JOIN image_tags it ON i.id = it.image_id LEFT JOIN tags t ON it.tag_id = t.id"
+            # Build complex query for OR/AND/EXCLUDE logic
+            if not self.included_or_tags and not self.included_and_tags and not self.excluded_tags:
+                # No filters - show all images
+                query = "SELECT DISTINCT i.relative_path, i.filename FROM images i ORDER BY i.filename"
+                params = []
+            else:
+                # Start with all images
+                query = "SELECT DISTINCT i.relative_path, i.filename FROM images i WHERE 1=1"
+                params = []
                 
-                conditions = []
-                
-                if self.included_tags:
-                    placeholders = ','.join( ['?'] * len( self.included_tags ) )
-                    conditions.append( f"t.name IN ({placeholders})" )
-                    params.extend( self.included_tags )
-                    
+                # Apply EXCLUDE filter (highest priority - exclude any image with excluded tags)
                 if self.excluded_tags:
                     placeholders = ','.join( ['?'] * len( self.excluded_tags ) )
-                    conditions.append( f"i.id NOT IN (SELECT it2.image_id FROM image_tags it2 JOIN tags t2 ON it2.tag_id = t2.id WHERE t2.name IN ({placeholders}))" )
+                    query += f" AND i.id NOT IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({placeholders}))"
                     params.extend( self.excluded_tags )
-                    
-                if conditions:
-                    query += " WHERE " + " AND ".join( conditions )
-                    
-            query += " ORDER BY i.filename"
+                
+                # Apply OR and AND logic
+                include_conditions = []
+                
+                # Include (OR) - images that have ANY of these tags
+                if self.included_or_tags:
+                    placeholders = ','.join( ['?'] * len( self.included_or_tags ) )
+                    include_conditions.append( f"i.id IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({placeholders}))" )
+                    params.extend( self.included_or_tags )
+                
+                # Include (AND) - images that have ALL of these tags
+                if self.included_and_tags:
+                    and_condition = f"i.id IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({','.join(['?'] * len(self.included_and_tags))}) GROUP BY it.image_id HAVING COUNT(DISTINCT t.name) = ?)"
+                    include_conditions.append( and_condition )
+                    params.extend( self.included_and_tags )
+                    params.append( len( self.included_and_tags ) )
+                
+                # Combine OR and AND conditions
+                if include_conditions:
+                    query += " AND (" + " OR ".join( include_conditions ) + ")"
+                
+                query += " ORDER BY i.filename"
             
             cursor.execute( query, params )
             images = cursor.fetchall()
@@ -1181,20 +1209,41 @@ class ImageViewer:
         except Exception as e:
             self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
         
-    def on_all_include_changed( self ):
-        """Handle 'all' include checkbox change"""
-        include_all = self.all_include_var.get()
+    def on_all_include_or_changed( self ):
+        """Handle 'all' include (OR) checkbox change"""
+        include_all = self.all_include_or_var.get()
         
-        # Update all individual tag include checkboxes
+        # Update all individual tag include (OR) checkboxes
         for tag, checkboxes in self.tag_checkboxes.items():
-            checkboxes['include_var'].set( include_all )
+            checkboxes['include_or_var'].set( include_all )
             if include_all:
-                self.included_tags.add( tag )
-                # Uncheck exclude if include is checked
+                self.included_or_tags.add( tag )
+                # Uncheck exclude and include (AND) if include (OR) is checked
                 checkboxes['exclude_var'].set( False )
+                checkboxes['include_and_var'].set( False )
                 self.excluded_tags.discard( tag )
+                self.included_and_tags.discard( tag )
             else:
-                self.included_tags.discard( tag )
+                self.included_or_tags.discard( tag )
+                
+        self.refresh_filtered_images()
+        
+    def on_all_include_and_changed( self ):
+        """Handle 'all' include (AND) checkbox change"""
+        include_all = self.all_include_and_var.get()
+        
+        # Update all individual tag include (AND) checkboxes
+        for tag, checkboxes in self.tag_checkboxes.items():
+            checkboxes['include_and_var'].set( include_all )
+            if include_all:
+                self.included_and_tags.add( tag )
+                # Uncheck exclude and include (OR) if include (AND) is checked
+                checkboxes['exclude_var'].set( False )
+                checkboxes['include_or_var'].set( False )
+                self.excluded_tags.discard( tag )
+                self.included_or_tags.discard( tag )
+            else:
+                self.included_and_tags.discard( tag )
                 
         self.refresh_filtered_images()
         
@@ -1207,27 +1256,49 @@ class ImageViewer:
             checkboxes['exclude_var'].set( exclude_all )
             if exclude_all:
                 self.excluded_tags.add( tag )
-                # Uncheck include if exclude is checked
-                checkboxes['include_var'].set( False )
-                self.included_tags.discard( tag )
+                # Uncheck include (OR) and include (AND) if exclude is checked
+                checkboxes['include_or_var'].set( False )
+                checkboxes['include_and_var'].set( False )
+                self.included_or_tags.discard( tag )
+                self.included_and_tags.discard( tag )
             else:
                 self.excluded_tags.discard( tag )
                 
         self.refresh_filtered_images()
         
-    def on_tag_include_changed( self, tag ):
-        """Handle individual tag include checkbox change"""
-        include_checked = self.tag_checkboxes[tag]['include_var'].get()
+    def on_tag_include_or_changed( self, tag ):
+        """Handle individual tag include (OR) checkbox change"""
+        include_checked = self.tag_checkboxes[tag]['include_or_var'].get()
         
         if include_checked:
-            self.included_tags.add( tag )
-            # Uncheck exclude for this tag
+            self.included_or_tags.add( tag )
+            # Uncheck exclude and include (AND) for this tag
             self.tag_checkboxes[tag]['exclude_var'].set( False )
+            self.tag_checkboxes[tag]['include_and_var'].set( False )
             self.excluded_tags.discard( tag )
-            # Uncheck "all" include since not all are selected
-            self.all_include_var.set( False )
+            self.included_and_tags.discard( tag )
+            # Uncheck "all" include (OR) since not all are selected
+            self.all_include_or_var.set( False )
         else:
-            self.included_tags.discard( tag )
+            self.included_or_tags.discard( tag )
+            
+        self.refresh_filtered_images()
+        
+    def on_tag_include_and_changed( self, tag ):
+        """Handle individual tag include (AND) checkbox change"""
+        include_checked = self.tag_checkboxes[tag]['include_and_var'].get()
+        
+        if include_checked:
+            self.included_and_tags.add( tag )
+            # Uncheck exclude and include (OR) for this tag
+            self.tag_checkboxes[tag]['exclude_var'].set( False )
+            self.tag_checkboxes[tag]['include_or_var'].set( False )
+            self.excluded_tags.discard( tag )
+            self.included_or_tags.discard( tag )
+            # Uncheck "all" include (AND) since not all are selected
+            self.all_include_and_var.set( False )
+        else:
+            self.included_and_tags.discard( tag )
             
         self.refresh_filtered_images()
         
@@ -1237,9 +1308,11 @@ class ImageViewer:
         
         if exclude_checked:
             self.excluded_tags.add( tag )
-            # Uncheck include for this tag
-            self.tag_checkboxes[tag]['include_var'].set( False )
-            self.included_tags.discard( tag )
+            # Uncheck include (OR) and include (AND) for this tag
+            self.tag_checkboxes[tag]['include_or_var'].set( False )
+            self.tag_checkboxes[tag]['include_and_var'].set( False )
+            self.included_or_tags.discard( tag )
+            self.included_and_tags.discard( tag )
             # Uncheck "all" exclude since not all are selected
             self.all_exclude_var.set( False )
         else:
@@ -1249,15 +1322,18 @@ class ImageViewer:
         
     def clear_filters( self ):
         """Clear all tag filters"""
-        self.included_tags.clear()
+        self.included_or_tags.clear()
+        self.included_and_tags.clear()
         self.excluded_tags.clear()
         
         # Clear all checkboxes
-        self.all_include_var.set( False )
+        self.all_include_or_var.set( False )
+        self.all_include_and_var.set( False )
         self.all_exclude_var.set( False )
         
         for tag, checkboxes in self.tag_checkboxes.items():
-            checkboxes['include_var'].set( False )
+            checkboxes['include_or_var'].set( False )
+            checkboxes['include_and_var'].set( False )
             checkboxes['exclude_var'].set( False )
             
         self.refresh_filtered_images()
