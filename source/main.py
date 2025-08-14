@@ -73,6 +73,7 @@ class ImageViewer:
         menubar.add_cascade( label="Database", menu=database_menu )
         
         database_menu.add_command( label="Create Database", command=self.create_database )
+        database_menu.add_command( label="Create Database Here", command=self.create_database_here )
         database_menu.add_command( label="Open Database", command=self.open_database )
         database_menu.add_command( label="Rescan", command=self.rescan_database )
         
@@ -134,6 +135,10 @@ class ImageViewer:
         
     def setup_database_tab( self ):
         """Setup the Database tab interface"""
+        # Database name header
+        self.database_name_label = ttk.Label( self.database_frame, text="No database open", font=('TkDefaultFont', 10, 'bold') )
+        self.database_name_label.pack( pady=(5, 10) )
+        
         # Create paned window for two columns
         paned = ttk.PanedWindow( self.database_frame, orient=tk.HORIZONTAL )
         paned.pack( fill=tk.BOTH, expand=True )
@@ -157,24 +162,50 @@ class ImageViewer:
         tag_frame = ttk.LabelFrame( right_frame, text="Tag Filters" )
         tag_frame.pack( fill=tk.X, padx=5, pady=5 )
         
-        # Tag listbox with scrollbar
-        tag_list_frame = ttk.Frame( tag_frame )
-        tag_list_frame.pack( fill=tk.BOTH, expand=True )
+        # Create frame for tag filter with proper grid layout
+        tag_filter_frame = ttk.Frame( tag_frame )
+        tag_filter_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
         
-        self.tag_listbox = tk.Listbox( tag_list_frame, height=8 )
-        tag_scrollbar = ttk.Scrollbar( tag_list_frame, orient=tk.VERTICAL, command=self.tag_listbox.yview )
-        self.tag_listbox.configure( yscrollcommand=tag_scrollbar.set )
+        # Configure grid columns with fixed widths
+        tag_filter_frame.grid_columnconfigure( 0, minsize=60 )  # Include column
+        tag_filter_frame.grid_columnconfigure( 1, minsize=60 )  # Exclude column  
+        tag_filter_frame.grid_columnconfigure( 2, weight=1 )    # Tag name column
         
-        self.tag_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        # Headers
+        ttk.Label( tag_filter_frame, text="Include" ).grid( row=0, column=0, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Exclude" ).grid( row=0, column=1, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Tag Name" ).grid( row=0, column=2, sticky="w", padx=5, pady=2 )
+        
+        # Separator line
+        ttk.Separator( tag_filter_frame, orient='horizontal' ).grid( row=1, column=0, columnspan=3, sticky="ew", pady=2 )
+        
+        # Scrollable frame for tag rows
+        canvas_frame = ttk.Frame( tag_filter_frame )
+        canvas_frame.grid( row=2, column=0, columnspan=3, sticky="nsew", pady=5 )
+        tag_filter_frame.grid_rowconfigure( 2, weight=1 )
+        
+        self.tag_canvas = tk.Canvas( canvas_frame, height=150 )
+        tag_scrollbar = ttk.Scrollbar( canvas_frame, orient=tk.VERTICAL, command=self.tag_canvas.yview )
+        self.tag_scrollable_frame = ttk.Frame( self.tag_canvas )
+        
+        # Configure scrollable frame
+        self.tag_scrollable_frame.bind( "<Configure>", lambda e: self.tag_canvas.configure( scrollregion=self.tag_canvas.bbox( "all" ) ) )
+        self.tag_canvas.create_window( (0, 0), window=self.tag_scrollable_frame, anchor="nw" )
+        self.tag_canvas.configure( yscrollcommand=tag_scrollbar.set )
+        
+        # Configure scrollable frame columns to match parent
+        self.tag_scrollable_frame.grid_columnconfigure( 0, minsize=60 )
+        self.tag_scrollable_frame.grid_columnconfigure( 1, minsize=60 )
+        self.tag_scrollable_frame.grid_columnconfigure( 2, weight=1 )
+        
+        self.tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
         tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
         
-        # Filter buttons
+        # Clear filters button
         filter_button_frame = ttk.Frame( tag_frame )
         filter_button_frame.pack( fill=tk.X, pady=5 )
         
-        ttk.Button( filter_button_frame, text="Include Selected", command=self.include_tags ).pack( side=tk.LEFT, padx=2 )
-        ttk.Button( filter_button_frame, text="Exclude Selected", command=self.exclude_tags ).pack( side=tk.LEFT, padx=2 )
-        ttk.Button( filter_button_frame, text="Clear Filters", command=self.clear_filters ).pack( side=tk.LEFT, padx=2 )
+        ttk.Button( filter_button_frame, text="Clear All Filters", command=self.clear_filters ).pack( side=tk.LEFT, padx=2 )
         
         # Image list section
         image_frame = ttk.LabelFrame( right_frame, text="Filtered Images" )
@@ -196,9 +227,12 @@ class ImageViewer:
         self.database_image_listbox.bind( "<Double-1>", self.on_database_image_double_click )
         self.database_image_listbox.bind( "<Button-3>", self.on_database_image_right_click )
         
-        # Initialize tag filters
+        # Initialize tag filters and checkbox tracking
         self.included_tags = set()
         self.excluded_tags = set()
+        self.tag_checkboxes = {}  # Dictionary to store checkbox variables
+        self.all_include_var = tk.BooleanVar()
+        self.all_exclude_var = tk.BooleanVar()
         
     def populate_drives( self ):
         """Populate the drive selection combobox with available drives"""
@@ -382,8 +416,14 @@ class ImageViewer:
         item = self.browse_tree.identify_row( event.y )
         if item:
             filepath = self.browse_tree.item( item )['values'][0]
+            
+            # Select the item that was right-clicked
+            self.browse_tree.selection_set( item )
+            
             if self.is_image_file( filepath ):
                 self.show_tag_dialog( filepath )
+            elif os.path.isdir( filepath ):
+                self.show_directory_context_menu( event, filepath )
                 
     def on_browse_preview_double_click( self, event ):
         """Handle double click on browse preview image"""
@@ -552,10 +592,7 @@ class ImageViewer:
             filepath = self.fullscreen_images[self.fullscreen_index]
             self.show_tag_dialog( filepath )
             
-    def setup_database_tab( self ):
-        """Setup the Database tab interface"""
-        # This method is already called in setup_ui, content was defined above
-        pass
+
         
     def on_tab_changed( self, event ):
         """Handle tab change events"""
@@ -622,6 +659,158 @@ class ImageViewer:
             # Open the newly created database
             self.current_database_path = db_path
             self.current_database = directory
+            self.refresh_database_view()
+            self.notebook.select( 1 )  # Switch to Database tab
+            
+            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
+            
+    def create_database_here( self ):
+        """Create a new database in the currently browsed directory"""
+        if not self.current_browse_directory:
+            messagebox.showwarning( "Warning", "No directory is currently selected in the browse tab" )
+            return
+            
+        directory = self.current_browse_directory
+        
+        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory}" )
+        if not db_name:
+            return
+            
+        if not db_name.endswith( '.db' ):
+            db_name += '.db'
+            
+        db_path = os.path.join( directory, db_name )
+        
+        # Check if database already exists
+        if os.path.exists( db_path ):
+            if not messagebox.askyesno( "Database Exists", f"Database {db_name} already exists in this directory. Overwrite?" ):
+                return
+                
+        try:
+            # Create database
+            conn = sqlite3.connect( db_path )
+            cursor = conn.cursor()
+            
+            # Create tables
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    rating INTEGER DEFAULT 0,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS image_tags (
+                    image_id INTEGER,
+                    tag_id INTEGER,
+                    FOREIGN KEY (image_id) REFERENCES images (id),
+                    FOREIGN KEY (tag_id) REFERENCES tags (id),
+                    PRIMARY KEY (image_id, tag_id)
+                )
+            ''' )
+            
+            # Scan directory for images
+            self.scan_directory_for_images( cursor, directory )
+            
+            conn.commit()
+            conn.close()
+            
+            # Open the newly created database
+            self.current_database_path = db_path
+            self.current_database = directory
+            self.refresh_database_view()
+            self.notebook.select( 1 )  # Switch to Database tab
+            
+            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
+            
+    def show_directory_context_menu( self, event, directory_path ):
+        """Show context menu for directory right-click"""
+        context_menu = tk.Menu( self.root, tearoff=0 )
+        context_menu.add_command( label="Create Database Here", command=lambda: self.create_database_in_directory( directory_path ) )
+        
+        try:
+            context_menu.tk_popup( event.x_root, event.y_root )
+        finally:
+            context_menu.grab_release()
+            
+    def create_database_in_directory( self, directory_path ):
+        """Create a database in the specified directory"""
+        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory_path}" )
+        if not db_name:
+            return
+            
+        if not db_name.endswith( '.db' ):
+            db_name += '.db'
+            
+        db_path = os.path.join( directory_path, db_name )
+        
+        # Check if database already exists
+        if os.path.exists( db_path ):
+            if not messagebox.askyesno( "Database Exists", f"Database {db_name} already exists in this directory. Overwrite?" ):
+                return
+                
+        try:
+            # Create database
+            conn = sqlite3.connect( db_path )
+            cursor = conn.cursor()
+            
+            # Create tables
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS images (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    filename TEXT NOT NULL,
+                    relative_path TEXT NOT NULL,
+                    width INTEGER,
+                    height INTEGER,
+                    rating INTEGER DEFAULT 0,
+                    created_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS tags (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT UNIQUE NOT NULL
+                )
+            ''' )
+            
+            cursor.execute( '''
+                CREATE TABLE IF NOT EXISTS image_tags (
+                    image_id INTEGER,
+                    tag_id INTEGER,
+                    FOREIGN KEY (image_id) REFERENCES images (id),
+                    FOREIGN KEY (tag_id) REFERENCES tags (id),
+                    PRIMARY KEY (image_id, tag_id)
+                )
+            ''' )
+            
+            # Scan directory for images
+            self.scan_directory_for_images( cursor, directory_path )
+            
+            conn.commit()
+            conn.close()
+            
+            # Open the newly created database
+            self.current_database_path = db_path
+            self.current_database = directory_path
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
             
@@ -742,9 +931,20 @@ class ImageViewer:
     def refresh_database_view( self ):
         """Refresh the database tab view"""
         if not self.current_database_path:
+            # Clear the view when no database is open
+            self.database_name_label.configure( text="No database open" )
+            self.tag_listbox.delete( 0, tk.END )
+            self.database_image_listbox.delete( 0, tk.END )
+            self.database_preview_label.configure( image="", text="No database open" )
+            self.database_preview_label.image = None
             return
             
         try:
+            # Update database name label
+            db_name = os.path.basename( self.current_database_path )
+            db_directory = os.path.basename( self.current_database )
+            self.database_name_label.configure( text=f"Database: {db_name} (in {db_directory})" )
+            
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
@@ -752,9 +952,43 @@ class ImageViewer:
             cursor.execute( "SELECT name FROM tags ORDER BY name" )
             tags = [row[0] for row in cursor.fetchall()]
             
-            self.tag_listbox.delete( 0, tk.END )
-            for tag in tags:
-                self.tag_listbox.insert( tk.END, tag )
+            # Clear existing tag checkboxes
+            for widget in self.tag_scrollable_frame.winfo_children():
+                widget.destroy()
+            self.tag_checkboxes.clear()
+            
+            # Create "all" pseudo tag row
+            row = 0
+            all_include_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_include_var, command=self.on_all_include_changed )
+            all_include_cb.grid( row=row, column=0, sticky="w", padx=5, pady=1 )
+            
+            all_exclude_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=self.all_exclude_var, command=self.on_all_exclude_changed )
+            all_exclude_cb.grid( row=row, column=1, sticky="w", padx=5, pady=1 )
+            
+            ttk.Label( self.tag_scrollable_frame, text="all", font=('TkDefaultFont', 9, 'italic') ).grid( row=row, column=2, sticky="w", padx=5, pady=1 )
+            
+            # Create checkbox rows for each tag
+            for i, tag in enumerate( tags, start=1 ):
+                # Create variables for this tag
+                include_var = tk.BooleanVar()
+                exclude_var = tk.BooleanVar()
+                
+                # Create checkboxes directly in scrollable frame
+                include_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=include_var, command=lambda t=tag: self.on_tag_include_changed( t ) )
+                include_cb.grid( row=i, column=0, sticky="w", padx=5, pady=1 )
+                
+                exclude_cb = tk.Checkbutton( self.tag_scrollable_frame, variable=exclude_var, command=lambda t=tag: self.on_tag_exclude_changed( t ) )
+                exclude_cb.grid( row=i, column=1, sticky="w", padx=5, pady=1 )
+                
+                ttk.Label( self.tag_scrollable_frame, text=tag ).grid( row=i, column=2, sticky="w", padx=5, pady=1 )
+                
+                # Store checkbox variables
+                self.tag_checkboxes[tag] = {
+                    'include_var': include_var,
+                    'exclude_var': exclude_var,
+                    'include_cb': include_cb,
+                    'exclude_cb': exclude_cb
+                }
                 
             # Load filtered images
             self.refresh_filtered_images()
@@ -871,23 +1105,69 @@ class ImageViewer:
             
         return None
         
-    def include_tags( self ):
-        """Include selected tags in filter"""
-        selection = self.tag_listbox.curselection()
-        for index in selection:
-            tag = self.tag_listbox.get( index )
+    def on_all_include_changed( self ):
+        """Handle 'all' include checkbox change"""
+        include_all = self.all_include_var.get()
+        
+        # Update all individual tag include checkboxes
+        for tag, checkboxes in self.tag_checkboxes.items():
+            checkboxes['include_var'].set( include_all )
+            if include_all:
+                self.included_tags.add( tag )
+                # Uncheck exclude if include is checked
+                checkboxes['exclude_var'].set( False )
+                self.excluded_tags.discard( tag )
+            else:
+                self.included_tags.discard( tag )
+                
+        self.refresh_filtered_images()
+        
+    def on_all_exclude_changed( self ):
+        """Handle 'all' exclude checkbox change"""
+        exclude_all = self.all_exclude_var.get()
+        
+        # Update all individual tag exclude checkboxes
+        for tag, checkboxes in self.tag_checkboxes.items():
+            checkboxes['exclude_var'].set( exclude_all )
+            if exclude_all:
+                self.excluded_tags.add( tag )
+                # Uncheck include if exclude is checked
+                checkboxes['include_var'].set( False )
+                self.included_tags.discard( tag )
+            else:
+                self.excluded_tags.discard( tag )
+                
+        self.refresh_filtered_images()
+        
+    def on_tag_include_changed( self, tag ):
+        """Handle individual tag include checkbox change"""
+        include_checked = self.tag_checkboxes[tag]['include_var'].get()
+        
+        if include_checked:
             self.included_tags.add( tag )
+            # Uncheck exclude for this tag
+            self.tag_checkboxes[tag]['exclude_var'].set( False )
             self.excluded_tags.discard( tag )
+            # Uncheck "all" include since not all are selected
+            self.all_include_var.set( False )
+        else:
+            self.included_tags.discard( tag )
             
         self.refresh_filtered_images()
         
-    def exclude_tags( self ):
-        """Exclude selected tags from filter"""
-        selection = self.tag_listbox.curselection()
-        for index in selection:
-            tag = self.tag_listbox.get( index )
+    def on_tag_exclude_changed( self, tag ):
+        """Handle individual tag exclude checkbox change"""
+        exclude_checked = self.tag_checkboxes[tag]['exclude_var'].get()
+        
+        if exclude_checked:
             self.excluded_tags.add( tag )
+            # Uncheck include for this tag
+            self.tag_checkboxes[tag]['include_var'].set( False )
             self.included_tags.discard( tag )
+            # Uncheck "all" exclude since not all are selected
+            self.all_exclude_var.set( False )
+        else:
+            self.excluded_tags.discard( tag )
             
         self.refresh_filtered_images()
         
@@ -895,6 +1175,15 @@ class ImageViewer:
         """Clear all tag filters"""
         self.included_tags.clear()
         self.excluded_tags.clear()
+        
+        # Clear all checkboxes
+        self.all_include_var.set( False )
+        self.all_exclude_var.set( False )
+        
+        for tag, checkboxes in self.tag_checkboxes.items():
+            checkboxes['include_var'].set( False )
+            checkboxes['exclude_var'].set( False )
+            
         self.refresh_filtered_images()
         
     def show_tag_dialog( self, filepath ):
