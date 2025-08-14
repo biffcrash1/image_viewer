@@ -659,20 +659,46 @@ class ImageViewer:
         """Enter fullscreen mode for viewing images"""
         self.previous_tab = self.notebook.index( self.notebook.select() )
         
-        # Get list of images in the same directory
-        directory = os.path.dirname( filepath )
-        self.fullscreen_images = []
+        # Determine which tab we're in and get appropriate image list
+        current_tab = self.notebook.index( self.notebook.select() )
         
-        try:
-            for file in sorted( os.listdir( directory ) ):
-                file_path = os.path.join( directory, file )
-                if self.is_image_file( file_path ):
-                    self.fullscreen_images.append( file_path )
-                    
-            self.fullscreen_index = self.fullscreen_images.index( filepath ) if filepath in self.fullscreen_images else 0
-        except (ValueError, OSError):
-            self.fullscreen_images = [filepath]
-            self.fullscreen_index = 0
+        if current_tab == 1 and self.current_database_path:  # Database tab
+            # Use filtered images from database
+            self.fullscreen_images = []
+            
+            # Get current filtered filenames from listbox
+            filtered_filenames = []
+            for i in range( self.database_image_listbox.size() ):
+                filtered_filenames.append( self.database_image_listbox.get( i ) )
+            
+            # Convert filenames to full paths
+            for filename in filtered_filenames:
+                full_path = self.find_image_path( filename )
+                if full_path:
+                    self.fullscreen_images.append( full_path )
+            
+            # Find current image index
+            try:
+                self.fullscreen_index = self.fullscreen_images.index( filepath ) if filepath in self.fullscreen_images else 0
+            except ValueError:
+                self.fullscreen_images = [filepath] if filepath else []
+                self.fullscreen_index = 0
+                
+        else:  # Browse tab or fallback
+            # Get list of images in the same directory
+            directory = os.path.dirname( filepath )
+            self.fullscreen_images = []
+            
+            try:
+                for file in sorted( os.listdir( directory ) ):
+                    file_path = os.path.join( directory, file )
+                    if self.is_image_file( file_path ):
+                        self.fullscreen_images.append( file_path )
+                        
+                self.fullscreen_index = self.fullscreen_images.index( filepath ) if filepath in self.fullscreen_images else 0
+            except (ValueError, OSError):
+                self.fullscreen_images = [filepath]
+                self.fullscreen_index = 0
             
         # Create fullscreen window
         self.fullscreen_window = tk.Toplevel( self.root )
@@ -688,10 +714,31 @@ class ImageViewer:
         self.fullscreen_window.bind( "<Double-Button-1>", self.exit_fullscreen_mode )
         self.fullscreen_window.bind( "<Button-3>", self.on_fullscreen_right_click )
         self.fullscreen_window.bind( "<MouseWheel>", self.on_fullscreen_scroll )
+        
+        # Add keyboard navigation
+        self.fullscreen_window.bind( "<Key-Up>", self.on_fullscreen_previous )
+        self.fullscreen_window.bind( "<Key-Down>", self.on_fullscreen_next )
+        self.fullscreen_window.bind( "<Key-space>", self.on_fullscreen_next )
+        self.fullscreen_window.bind( "<Key-Left>", self.on_fullscreen_previous )
+        self.fullscreen_window.bind( "<Key-Right>", self.on_fullscreen_next )
+        self.fullscreen_window.bind( "<Key-Escape>", self.exit_fullscreen_mode )
+        
         self.fullscreen_window.focus_set()
         
         # Display current image
         self.display_fullscreen_image()
+        
+    def on_fullscreen_previous( self, event ):
+        """Navigate to previous image in fullscreen mode"""
+        if self.fullscreen_images and self.fullscreen_index > 0:
+            self.fullscreen_index -= 1
+            self.display_fullscreen_image()
+            
+    def on_fullscreen_next( self, event ):
+        """Navigate to next image in fullscreen mode"""
+        if self.fullscreen_images and self.fullscreen_index < len( self.fullscreen_images ) - 1:
+            self.fullscreen_index += 1
+            self.display_fullscreen_image()
         
     def display_fullscreen_image( self ):
         """Display the current image in fullscreen mode"""
@@ -736,14 +783,19 @@ class ImageViewer:
             
     def on_fullscreen_scroll( self, event ):
         """Handle mouse wheel in fullscreen mode"""
-        if event.delta > 0:
-            # Scroll up - previous image
-            self.fullscreen_index = (self.fullscreen_index - 1) % len( self.fullscreen_images )
-        else:
-            # Scroll down - next image
-            self.fullscreen_index = (self.fullscreen_index + 1) % len( self.fullscreen_images )
+        if not self.fullscreen_images:
+            return
             
-        self.display_fullscreen_image()
+        if event.delta > 0:
+            # Scroll up - previous image (don't wrap)
+            if self.fullscreen_index > 0:
+                self.fullscreen_index -= 1
+                self.display_fullscreen_image()
+        else:
+            # Scroll down - next image (don't wrap)
+            if self.fullscreen_index < len( self.fullscreen_images ) - 1:
+                self.fullscreen_index += 1
+                self.display_fullscreen_image()
         
     def exit_fullscreen_mode( self, event=None ):
         """Exit fullscreen mode and return to previous tab"""
