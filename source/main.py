@@ -448,6 +448,7 @@ class ImageViewer:
         # Bind database image list events
         self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
         self.database_image_listbox.bind( "<Double-1>", self.on_database_image_double_click )
+        self.database_image_listbox.bind( "<MouseWheel>", self.on_database_preview_scroll )
         
         # Initialize tag filters and checkbox tracking
         self.included_or_tags = set()
