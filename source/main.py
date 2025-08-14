@@ -10,6 +10,7 @@ import sqlite3
 import os
 from PIL import Image, ImageTk, ExifTags
 import threading
+import time
 from pathlib import Path
 import json
 
@@ -1039,7 +1040,9 @@ class ImageViewer:
         if not directory:
             return
             
-        db_name = simpledialog.askstring( "Database Name", "Enter name for the new database:" )
+        # Ask for database name with directory name as default
+        default_name = os.path.basename( directory )
+        db_name = simpledialog.askstring( "Database Name", "Enter name for the new database:", initialvalue=default_name )
         if not db_name:
             return
             
@@ -1084,22 +1087,14 @@ class ImageViewer:
             ''' )
             
             # Scan directory for images with progress tracking
-            self.scan_directory_for_images_with_progress( cursor, directory )
-            
-            conn.commit()
+            # Close connection - worker thread will create its own
             conn.close()
             
-            # Open the newly created database
-            self.current_database_path = db_path
-            self.current_database = directory
-            self.refresh_database_view()
-            self.notebook.select( 1 )  # Switch to Database tab
-            # Save the database state immediately
-            self.save_paned_positions_only()
-            # Small delay to ensure settings are written
-            self.root.after(100, self.update_recent_databases_dropdown)
+            # Scan directory for images with progress tracking
+            # Database state and tab switch will be handled after scan completion
+            self.scan_directory_for_images_with_progress( db_path, directory )
             
-            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            # Success message will be shown by the threading completion handler
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
@@ -1112,7 +1107,9 @@ class ImageViewer:
             
         directory = self.current_browse_directory
         
-        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory}" )
+        # Ask for database name with directory name as default
+        default_name = os.path.basename( directory )
+        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory}", initialvalue=default_name )
         if not db_name:
             return
             
@@ -1162,22 +1159,14 @@ class ImageViewer:
             ''' )
             
             # Scan directory for images with progress tracking
-            self.scan_directory_for_images_with_progress( cursor, directory )
-            
-            conn.commit()
+            # Close connection - worker thread will create its own
             conn.close()
             
-            # Open the newly created database
-            self.current_database_path = db_path
-            self.current_database = directory
-            self.refresh_database_view()
-            self.notebook.select( 1 )  # Switch to Database tab
-            # Save the database state immediately
-            self.save_paned_positions_only()
-            # Small delay to ensure settings are written
-            self.root.after(100, self.update_recent_databases_dropdown)
+            # Scan directory for images with progress tracking
+            # Database state and tab switch will be handled after scan completion
+            self.scan_directory_for_images_with_progress( db_path, directory )
             
-            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            # Success message will be shown by the threading completion handler
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
@@ -1194,7 +1183,9 @@ class ImageViewer:
             
     def create_database_in_directory( self, directory_path ):
         """Create a database in the specified directory"""
-        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory_path}" )
+        # Ask for database name with directory name as default
+        default_name = os.path.basename( directory_path )
+        db_name = simpledialog.askstring( "Database Name", f"Enter name for the new database in:\n{directory_path}", initialvalue=default_name )
         if not db_name:
             return
             
@@ -1244,18 +1235,14 @@ class ImageViewer:
             ''' )
             
             # Scan directory for images with progress tracking
-            self.scan_directory_for_images_with_progress( cursor, directory_path )
-            
-            conn.commit()
+            # Close connection - worker thread will create its own
             conn.close()
             
-            # Open the newly created database
-            self.current_database_path = db_path
-            self.current_database = directory_path
-            self.refresh_database_view()
-            self.notebook.select( 1 )  # Switch to Database tab
+            # Scan directory for images with progress tracking
+            # Database state and tab switch will be handled after scan completion
+            self.scan_directory_for_images_with_progress( db_path, directory_path )
             
-            messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
+            # Success message will be shown by the threading completion handler
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
@@ -1283,16 +1270,48 @@ class ImageViewer:
                     except Exception as e:
                         print( f"Error processing {filepath}: {e}" )
                         
-    def scan_directory_for_images_with_progress( self, cursor, directory ):
+    def scan_directory_for_images_with_progress( self, db_path, directory ):
         """Scan directory recursively for image files and add to database with progress reporting"""
-        # First pass: count total files for progress calculation
-        total_files = 0
-        all_image_files = []
-        
+        # Create progress dialog in main thread
         progress_dialog = self.create_progress_dialog( "Creating Database", "Scanning directory..." )
+        
+        # Make sure the dialog is visible and on top
+        progress_dialog['window'].lift()
+        progress_dialog['window'].attributes('-topmost', True)
+        progress_dialog['window'].focus_force()
         self.root.update()
         
+        # Create thread-safe data container
+        thread_data = {
+            'db_path': db_path,
+            'directory': directory,
+            'progress_dialog': progress_dialog,
+            'exception': None,
+            'completed': False
+        }
+        
+        # Start background thread for scanning
+        scan_thread = threading.Thread( target=self._scan_worker_thread, args=(thread_data,), daemon=True )
+        scan_thread.start()
+        
+        # Start asynchronous monitoring from main thread
+        self._schedule_progress_monitoring( thread_data, scan_thread )
+    
+    def _scan_worker_thread( self, thread_data ):
+        """Worker thread for scanning directory and processing images"""
+        conn = None
         try:
+            db_path = thread_data['db_path']
+            directory = thread_data['directory']
+            
+            # Create database connection in worker thread
+            conn = sqlite3.connect( db_path )
+            cursor = conn.cursor()
+            
+            # First pass: count total files for progress calculation
+            total_files = 0
+            all_image_files = []
+            
             # Count image files
             for root, dirs, files in os.walk( directory ):
                 for file in files:
@@ -1301,15 +1320,19 @@ class ImageViewer:
                         all_image_files.append( filepath )
                         total_files += 1
                         
-            # Update progress dialog
-            progress_dialog['total'] = total_files
-            self.update_progress_dialog( progress_dialog, 0, total_files, "Processing images..." )
+            # Update progress dialog from worker thread (thread-safe)
+            thread_data['total_files'] = total_files
+            thread_data['current_files'] = all_image_files
+            thread_data['phase'] = 'processing'
             
             # Second pass: process files with progress updates
             processed = 0
+            successful = 0
             for filepath in all_image_files:
-                if progress_dialog.get( 'cancelled', False ):
-                    raise Exception( "Operation cancelled by user" )
+                # Check for cancellation
+                if thread_data['progress_dialog'].get( 'cancelled', False ):
+                    thread_data['exception'] = Exception( "Operation cancelled by user" )
+                    return
                     
                 try:
                     # Get image dimensions
@@ -1326,18 +1349,148 @@ class ImageViewer:
                         VALUES (?, ?, ?, ?)
                     ''', (filename, relative_path, width, height) )
                     
+                    successful += 1
+                    
                 except Exception as e:
                     print( f"Error processing {filepath}: {e}" )
                     
                 processed += 1
-                
-                # Update progress every 10 files or on last file
-                if processed % 10 == 0 or processed == total_files:
-                    self.update_progress_dialog( progress_dialog, processed, total_files, 
-                                               f"Processed {processed}/{total_files} images" )
+                thread_data['processed'] = processed
+                thread_data['successful'] = successful
+            
+            # Commit all changes
+            conn.commit()
                     
+        except Exception as e:
+            thread_data['exception'] = e
         finally:
-            self.close_progress_dialog( progress_dialog )
+            if conn:
+                conn.close()
+            thread_data['completed'] = True
+            print( f"Worker thread completed. Processed: {processed}, Successful: {successful}, Total: {total_files}" )
+    
+    def _schedule_progress_monitoring( self, thread_data, scan_thread ):
+        """Start asynchronous monitoring of background thread progress"""
+        # Schedule the first progress check
+        self.root.after( 100, lambda: self._check_progress( thread_data, scan_thread ) )
+    
+    def _check_progress( self, thread_data, scan_thread ):
+        """Check progress and schedule next update - non-blocking"""
+        try:
+            # Update progress dialog based on thread data
+            if 'total_files' in thread_data:
+                total_files = thread_data['total_files']
+                processed = thread_data.get( 'processed', 0 )
+                
+                if thread_data.get( 'phase' ) == 'processing':
+                    self.update_progress_dialog( 
+                        thread_data['progress_dialog'], 
+                        processed, 
+                        total_files, 
+                        f"Processed {processed}/{total_files} images" 
+                    )
+                else:
+                    self.update_progress_dialog( 
+                        thread_data['progress_dialog'], 
+                        0, 
+                        total_files, 
+                        "Processing images..." 
+                    )
+            
+            # Check if thread is still running and not cancelled
+            if scan_thread.is_alive() and not thread_data['progress_dialog'].get( 'cancelled', False ):
+                # Schedule next progress check
+                self.root.after( 100, lambda: self._check_progress( thread_data, scan_thread ) )
+            elif thread_data.get( 'completed', False ) or thread_data['progress_dialog'].get( 'cancelled', False ):
+                # Thread completed or was cancelled - do one final progress update then finalize
+                if thread_data.get( 'completed', False ) and 'total_files' in thread_data:
+                    # Show final progress update
+                    total_files = thread_data['total_files']
+                    processed = thread_data.get( 'processed', 0 )
+                    self.update_progress_dialog( 
+                        thread_data['progress_dialog'], 
+                        processed, 
+                        total_files, 
+                        f"Completed {processed}/{total_files} images" 
+                    )
+                # Finalize after a brief delay to show completion
+                self.root.after( 200, lambda: self._finalize_scan_operation( thread_data, scan_thread ) )
+                
+        except Exception as e:
+            print( f"Error in progress monitoring: {e}" )
+            self._finalize_scan_operation( thread_data, scan_thread )
+    
+    def _finalize_scan_operation( self, thread_data, scan_thread ):
+        """Finalize the scan operation - close dialog and show completion"""
+        try:
+            # Wait for thread to complete properly
+            if scan_thread.is_alive():
+                scan_thread.join( timeout=2.0 )  # Give more time for completion
+            
+            # Make sure progress shows 100% completion before closing
+            if 'total_files' in thread_data and 'processed' in thread_data:
+                total_files = thread_data['total_files']
+                processed = thread_data['processed']
+                self.update_progress_dialog( 
+                    thread_data['progress_dialog'], 
+                    processed, 
+                    total_files, 
+                    f"Completed {processed}/{total_files} images" 
+                )
+                # Give a moment for the user to see 100% completion
+                self.root.after( 500, lambda: self._complete_finalization( thread_data, scan_thread ) )
+            else:
+                self._complete_finalization( thread_data, scan_thread )
+                                   
+        except Exception as e:
+            print( f"Error finalizing scan operation: {e}" )
+            self._complete_finalization( thread_data, scan_thread )
+    
+    def _complete_finalization( self, thread_data, scan_thread ):
+        """Complete the finalization after showing 100% progress"""
+        try:
+            # Close progress dialog
+            self.close_progress_dialog( thread_data['progress_dialog'] )
+            
+            # Handle any exceptions that occurred in the worker thread
+            if thread_data.get( 'exception' ):
+                if "cancelled" not in str( thread_data['exception'] ).lower():
+                    messagebox.showerror( "Database Creation Error", str( thread_data['exception'] ) )
+                return
+            
+            # Show completion message only if operation completed successfully AND thread is actually done
+            if (not thread_data['progress_dialog'].get( 'cancelled', False ) and 
+                thread_data.get( 'completed', False ) and 
+                not scan_thread.is_alive()):
+                
+                total_files = thread_data.get( 'total_files', 0 )
+                processed = thread_data.get( 'processed', 0 )
+                successful = thread_data.get( 'successful', 0 )
+                failed = processed - successful
+                
+                # Open the newly created database
+                db_path = thread_data['db_path']
+                directory = thread_data['directory']
+                
+                self.current_database_path = db_path
+                self.current_database = directory
+                self.notebook.select( 1 )  # Switch to Database tab (this will call refresh_database_view via on_tab_changed)
+                
+                # Save the database state and update recent databases
+                self.save_paned_positions_only()
+                self.root.after(100, self.update_recent_databases_dropdown)
+                
+                message = f"Database creation completed!\n\n"
+                message += f"Files scanned: {total_files}\n"
+                message += f"Successfully added: {successful}\n"
+                if failed > 0:
+                    message += f"Failed/Skipped: {failed}\n"
+                    message += f"(Corrupted images, videos, or unsupported formats)"
+                
+                messagebox.showinfo( "Database Creation Complete", message )
+                                   
+        except Exception as e:
+            print( f"Error completing finalization: {e}" )
     
     def create_progress_dialog( self, title, message ):
         """Create a progress dialog window"""
@@ -1455,8 +1608,11 @@ class ImageViewer:
                 
             self.current_database_path = db_path
             self.current_database = os.path.dirname( db_path )
-            self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
+            
+            # Always refresh database view (in case tab was already selected)
+            self.refresh_database_view()
+            
             # Save the database state immediately
             self.save_paned_positions_only()
             # Small delay to ensure settings are written
@@ -1594,7 +1750,18 @@ class ImageViewer:
                     'exclude_cb': exclude_cb
                 }
                 
-            # Load filtered images
+            # Always ensure images are visible when database is first opened
+            # Clear any existing tag filters first
+            self.included_or_tags.clear()
+            self.included_and_tags.clear()
+            self.excluded_tags.clear()
+            
+            # Reset all checkbox states
+            self.all_include_or_var.set( False )
+            self.all_include_and_var.set( False )
+            self.all_exclude_var.set( False )
+            
+            # Refresh to show all images (no filters = show all)
             self.refresh_filtered_images()
             
             conn.close()
@@ -1630,6 +1797,7 @@ class ImageViewer:
                 # No filters - show all images
                 query = "SELECT DISTINCT i.relative_path, i.filename FROM images i ORDER BY i.filename"
                 params = []
+
             else:
                 # Start with all images
                 query = "SELECT DISTINCT i.relative_path, i.filename FROM images i WHERE 1=1"
