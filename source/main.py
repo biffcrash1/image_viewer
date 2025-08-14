@@ -8,7 +8,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox, simpledialog
 import sqlite3
 import os
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ExifTags
 import threading
 from pathlib import Path
 import json
@@ -678,10 +678,63 @@ class ImageViewer:
         # Trigger the selection event to update preview and tags
         self.on_database_image_select( None )
                 
+    def apply_exif_orientation( self, image ):
+        """Apply EXIF orientation to rotate image correctly"""
+        try:
+            # Try the newer Pillow method first (available in Pillow 6.0+)
+            if hasattr(image, 'getexif'):
+                exif = image.getexif()
+                orientation = exif.get(0x0112)  # 0x0112 is the EXIF orientation tag
+            else:
+                # Fallback to older method
+                exif = image._getexif()
+                orientation = None
+                if exif is not None:
+                    # Find the orientation tag
+                    for tag, value in ExifTags.TAGS.items():
+                        if value == 'Orientation':
+                            orientation = exif.get(tag)
+                            break
+            
+            if orientation:
+                # Apply rotation based on orientation value
+                if orientation == 2:
+                    # Horizontal flip
+                    image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                elif orientation == 3:
+                    # 180 degree rotation
+                    image = image.rotate(180, expand=True)
+                elif orientation == 4:
+                    # Vertical flip
+                    image = image.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+                elif orientation == 5:
+                    # Horizontal flip + 90 degree rotation
+                    image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                    image = image.rotate(90, expand=True)
+                elif orientation == 6:
+                    # 90 degree rotation (clockwise)
+                    image = image.rotate(270, expand=True)
+                elif orientation == 7:
+                    # Horizontal flip + 270 degree rotation
+                    image = image.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                    image = image.rotate(270, expand=True)
+                elif orientation == 8:
+                    # 270 degree rotation (counter-clockwise)
+                    image = image.rotate(90, expand=True)
+                        
+        except (AttributeError, KeyError, TypeError, OSError):
+            # No EXIF data, orientation tag, or other error - return original image
+            pass
+        
+        return image
+
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
         try:
             image = Image.open( filepath )
+            
+            # Apply EXIF orientation correction
+            image = self.apply_exif_orientation( image )
             
             # Get the available space in the label widget
             label_widget.update_idletasks()  # Ensure geometry is updated
@@ -814,6 +867,9 @@ class ImageViewer:
         
         try:
             image = Image.open( filepath )
+            
+            # Apply EXIF orientation correction
+            image = self.apply_exif_orientation( image )
             
             # Get screen dimensions
             screen_width = self.fullscreen_window.winfo_screenwidth()
