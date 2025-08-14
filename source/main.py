@@ -38,6 +38,15 @@ class ImageViewer:
         self.current_browse_directory = None
         self._rating_repeat_timer = None # For long press arrow key rating changes
         
+        # Lazy loading cache
+        self.image_metadata_cache = {}  # Cache for image metadata (rating, dimensions, tags)
+        self.tag_cache = {}  # Cache for tag data
+        self.cache_max_size = 1000  # Maximum items to keep in cache
+        
+        # Fullscreen lazy loading
+        self.fullscreen_filenames = []  # Store filenames instead of full paths
+        self.fullscreen_paths_cache = {}  # Cache for resolved paths
+        
         # Supported image formats
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
         
@@ -449,7 +458,7 @@ class ImageViewer:
         # Bind database image list events
         self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
         self.database_image_listbox.bind( "<Double-1>", self.on_database_image_double_click )
-        self.database_image_listbox.bind( "<MouseWheel>", self.on_database_preview_scroll )
+        # Note: Removed MouseWheel binding - listbox will scroll normally
         
         # Initialize tag filters and checkbox tracking
         self.included_or_tags = set()
@@ -742,10 +751,10 @@ class ImageViewer:
             else:
                 return  # Already at last image
                 
-        # Select the new item
+        # Select the new item and auto-scroll the listbox to keep it visible
         self.database_image_listbox.selection_clear( 0, tk.END )
         self.database_image_listbox.selection_set( new_index )
-        self.database_image_listbox.see( new_index )  # Ensure it's visible
+        self.database_image_listbox.see( new_index )  # Auto-scroll to ensure the selected item is visible
         
         # Trigger the selection event to update preview and tags
         self.on_database_image_select( None )
@@ -846,33 +855,34 @@ class ImageViewer:
             label_widget.current_image_path = None
             
     def enter_fullscreen_mode( self, filepath ):
-        """Enter fullscreen mode for viewing images"""
+        """Enter fullscreen mode for viewing images with lazy loading for large databases"""
         self.previous_tab = self.notebook.index( self.notebook.select() )
         
         # Determine which tab we're in and get appropriate image list
         current_tab = self.notebook.index( self.notebook.select() )
         
         if current_tab == 1 and self.current_database_path:  # Database tab
-            # Use filtered images from database
-            self.fullscreen_images = []
+            # Use lazy loading approach - store filenames instead of resolving all paths
+            self.fullscreen_filenames = []
+            self.fullscreen_images = []  # Keep for compatibility but will be populated lazily
+            self.fullscreen_paths_cache.clear()  # Clear path cache
             
             # Get current filtered filenames from listbox
-            filtered_filenames = []
             for i in range( self.database_image_listbox.size() ):
-                filtered_filenames.append( self.database_image_listbox.get( i ) )
+                self.fullscreen_filenames.append( self.database_image_listbox.get( i ) )
             
-            # Convert filenames to full paths
-            for filename in filtered_filenames:
-                full_path = self.find_image_path( filename )
-                if full_path:
-                    self.fullscreen_images.append( full_path )
-            
-            # Find current image index
+            # Find current image index by filename
+            current_filename = os.path.basename( filepath ) if filepath else ""
             try:
-                self.fullscreen_index = self.fullscreen_images.index( filepath ) if filepath in self.fullscreen_images else 0
+                self.fullscreen_index = self.fullscreen_filenames.index( current_filename ) if current_filename in self.fullscreen_filenames else 0
             except ValueError:
-                self.fullscreen_images = [filepath] if filepath else []
+                # Fallback: add current image as the only item
+                self.fullscreen_filenames = [current_filename] if current_filename else []
                 self.fullscreen_index = 0
+            
+            # Cache the current image path
+            if current_filename and filepath:
+                self.fullscreen_paths_cache[current_filename] = filepath
                 
         else:  # Browse tab or fallback
             # Get list of images in the same directory
@@ -936,22 +946,25 @@ class ImageViewer:
         
     def on_fullscreen_previous( self, event ):
         """Navigate to previous image in fullscreen mode"""
-        if self.fullscreen_images and self.fullscreen_index > 0:
+        max_images = len( self.fullscreen_filenames ) if self.fullscreen_filenames else len( self.fullscreen_images )
+        if max_images and self.fullscreen_index > 0:
             self.fullscreen_index -= 1
             self.display_fullscreen_image()
             
     def on_fullscreen_next( self, event ):
         """Navigate to next image in fullscreen mode"""
-        if self.fullscreen_images and self.fullscreen_index < len( self.fullscreen_images ) - 1:
+        max_images = len( self.fullscreen_filenames ) if self.fullscreen_filenames else len( self.fullscreen_images )
+        if max_images and self.fullscreen_index < max_images - 1:
             self.fullscreen_index += 1
             self.display_fullscreen_image()
         
     def display_fullscreen_image( self ):
-        """Display the current image in fullscreen mode"""
-        if not self.fullscreen_images or self.fullscreen_index >= len( self.fullscreen_images ):
+        """Display the current image in fullscreen mode with lazy loading"""
+        # Use lazy loading approach for database images
+        filepath = self.get_fullscreen_image_path( self.fullscreen_index )
+        
+        if not filepath:
             return
-            
-        filepath = self.fullscreen_images[self.fullscreen_index]
         
         try:
             image = Image.open( filepath )
@@ -991,8 +1004,9 @@ class ImageViewer:
             self.fullscreen_label.image = None
             
     def on_fullscreen_scroll( self, event ):
-        """Handle mouse wheel in fullscreen mode"""
-        if not self.fullscreen_images:
+        """Handle mouse wheel in fullscreen mode with lazy loading"""
+        max_images = len( self.fullscreen_filenames ) if self.fullscreen_filenames else len( self.fullscreen_images )
+        if not max_images:
             return
             
         if event.delta > 0:
@@ -1002,7 +1016,7 @@ class ImageViewer:
                 self.display_fullscreen_image()
         else:
             # Scroll down - next image (don't wrap)
-            if self.fullscreen_index < len( self.fullscreen_images ) - 1:
+            if self.fullscreen_index < max_images - 1:
                 self.fullscreen_index += 1
                 self.display_fullscreen_image()
         
@@ -1711,6 +1725,9 @@ class ImageViewer:
             return
             
         try:
+            # Clear cache when refreshing database view
+            self.clear_cache()
+            
             # Update database name label
             db_name = os.path.basename( self.current_database_path )
             db_directory = os.path.basename( self.current_database )
@@ -1975,27 +1992,21 @@ class ImageViewer:
             self.clear_image_tag_interface()
             
     def load_image_tags_for_editing( self ):
-        """Load tags for the selected images into the editing interface"""
+        """Load tags for the selected images into the editing interface with lazy loading"""
         if not self.selected_image_files or not self.current_database_path:
             self.clear_image_tag_interface()
             return
             
         try:
-            conn = sqlite3.connect( self.current_database_path )
-            cursor = conn.cursor()
-            
-            # Get image IDs and their data
+            # Use lazy loading to get image metadata
             image_data = {}
             ratings = []
             
             for filepath in self.selected_image_files:
-                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
-                cursor.execute( "SELECT id, rating FROM images WHERE relative_path = ?", (relative_path,) )
-                result = cursor.fetchone()
-                
-                if result:
-                    image_data[filepath] = {'id': result[0], 'rating': result[1] or 0}
-                    ratings.append( result[1] or 0 )
+                metadata = self.load_image_metadata_lazy( filepath )
+                if metadata:
+                    image_data[filepath] = {'id': metadata['id'], 'rating': metadata['rating']}
+                    ratings.append( metadata['rating'] )
             
             if not image_data:
                 self.clear_image_tag_interface()
@@ -2012,30 +2023,19 @@ class ImageViewer:
                     self.image_rating_scale.configure( state='disabled' )
                     self.image_rating_var.set( 0 )
             
-            # Get only tags that are actually used by files in the database
-            cursor.execute( """
-                SELECT DISTINCT t.id, t.name 
-                FROM tags t 
-                INNER JOIN image_tags it ON t.id = it.tag_id 
-                INNER JOIN images i ON it.image_id = i.id 
-                ORDER BY t.name
-            """ )
-            all_tags = cursor.fetchall()
+            # Use lazy loading to get all available tags
+            all_tags = self.load_all_tags_lazy()
             
-            # For each tag, count how many selected images have it
+            # For each tag, count how many selected images have it using cached metadata
             tag_counts = {}
             total_images = len( image_data )
             
             for tag_id, tag_name in all_tags:
-                # Count how many of the selected images have this tag
-                placeholders = ','.join( ['?' for _ in image_data.values()] )
-                query = f"""
-                    SELECT COUNT(*) FROM image_tags 
-                    WHERE tag_id = ? AND image_id IN ({placeholders})
-                """
-                params = [tag_id] + [img['id'] for img in image_data.values()]
-                cursor.execute( query, params )
-                count = cursor.fetchone()[0]
+                count = 0
+                for filepath in self.selected_image_files:
+                    metadata = self.get_cached_image_metadata( filepath )
+                    if metadata and tag_name in metadata['tags']:
+                        count += 1
                 tag_counts[tag_id] = count
                 
             # Clear existing checkboxes
@@ -2097,8 +2097,6 @@ class ImageViewer:
             
             # Enable apply button
             self.image_apply_button.configure( state='normal' )
-            
-            conn.close()
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to load tags for editing: {str(e)}" )
@@ -2195,6 +2193,10 @@ class ImageViewer:
             conn.commit()
             conn.close()
             
+            # Invalidate cache for all affected images
+            for filepath in self.selected_image_files:
+                self.invalidate_image_cache( filepath )
+            
             # Refresh views to reflect changes
             self.refresh_database_view()
             self.refresh_filtered_images()
@@ -2236,6 +2238,10 @@ class ImageViewer:
             for filepath in self.selected_image_files:
                 relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
                 cursor.execute( "UPDATE images SET rating = ? WHERE relative_path = ?", (rating, relative_path) )
+                
+                # Invalidate cache entry for this image so it gets fresh data next time
+                if filepath in self.image_metadata_cache:
+                    del self.image_metadata_cache[filepath]
             
             conn.commit()
             
@@ -2306,6 +2312,10 @@ class ImageViewer:
             if changes_made:
                 conn.commit()
                 
+                # Invalidate cache for all affected images
+                for filepath in self.selected_image_files:
+                    self.invalidate_image_cache( filepath )
+                
                 # Clear new tags entry
                 self.image_new_tags_entry.delete( 0, tk.END )
                 
@@ -2358,6 +2368,62 @@ class ImageViewer:
                 
         except Exception as e:
             print( f"Error finding image path: {e}" )
+            
+        return None
+    
+    def get_image_paths_batch( self, filenames ):
+        """Efficiently get full paths for multiple filenames using a single batch query"""
+        if not self.current_database_path or not filenames:
+            return []
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Create placeholders for the IN clause
+            placeholders = ','.join( ['?'] * len( filenames ) )
+            query = f"SELECT filename, relative_path FROM images WHERE filename IN ({placeholders})"
+            
+            cursor.execute( query, filenames )
+            results = cursor.fetchall()
+            conn.close()
+            
+            # Create a mapping of filename to full path
+            filename_to_path = {}
+            for filename, relative_path in results:
+                filename_to_path[filename] = os.path.join( self.current_database, relative_path )
+            
+            # Return paths in the same order as the input filenames
+            full_paths = []
+            for filename in filenames:
+                if filename in filename_to_path:
+                    full_paths.append( filename_to_path[filename] )
+            
+            return full_paths
+                
+        except Exception as e:
+            print( f"Error getting image paths in batch: {e}" )
+            return []
+    
+    def get_fullscreen_image_path( self, index ):
+        """Lazily get the full path for a fullscreen image at the given index"""
+        if self.current_database_path and 0 <= index < len( self.fullscreen_filenames ):
+            filename = self.fullscreen_filenames[index]
+            
+            # Check cache first
+            if filename in self.fullscreen_paths_cache:
+                return self.fullscreen_paths_cache[filename]
+            
+            # Resolve path from database
+            full_path = self.find_image_path( filename )
+            if full_path:
+                # Cache the result
+                self.fullscreen_paths_cache[filename] = full_path
+                return full_path
+        
+        # Fallback to traditional approach for browse tab
+        if 0 <= index < len( self.fullscreen_images ):
+            return self.fullscreen_images[index]
             
         return None
         
@@ -3008,6 +3074,125 @@ class ImageViewer:
         # Prompt to restore database after a short delay
         self.root.after( 500, self.prompt_restore_database )
     
+    # Lazy Loading Cache Management
+    def clear_cache( self ):
+        """Clear all cached data"""
+        self.image_metadata_cache.clear()
+        self.tag_cache.clear()
+    
+    def get_cached_image_metadata( self, filepath ):
+        """Get cached image metadata or None if not cached"""
+        return self.image_metadata_cache.get( filepath )
+    
+    def cache_image_metadata( self, filepath, metadata ):
+        """Cache image metadata with size limit"""
+        if len( self.image_metadata_cache ) >= self.cache_max_size:
+            # Remove oldest entries (simple FIFO eviction)
+            oldest_keys = list( self.image_metadata_cache.keys() )[:100]
+            for key in oldest_keys:
+                del self.image_metadata_cache[key]
+        
+        self.image_metadata_cache[filepath] = metadata
+    
+    def get_cached_tags( self ):
+        """Get cached tag data or None if not cached"""
+        return self.tag_cache.get( 'all_tags' )
+    
+    def cache_tags( self, tags ):
+        """Cache tag data"""
+        self.tag_cache['all_tags'] = tags
+    
+    def invalidate_image_cache( self, filepath ):
+        """Invalidate cache entry for a specific image"""
+        if filepath in self.image_metadata_cache:
+            del self.image_metadata_cache[filepath]
+    
+    def load_image_metadata_lazy( self, filepath ):
+        """Lazily load image metadata (rating, tags, dimensions) with caching"""
+        # Check cache first
+        cached = self.get_cached_image_metadata( filepath )
+        if cached:
+            return cached
+        
+        # Load from database
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image basic info
+            relative_path = os.path.relpath( filepath, self.current_database )
+            cursor.execute( "SELECT id, rating, width, height FROM images WHERE relative_path = ?", (relative_path,) )
+            result = cursor.fetchone()
+            
+            if not result:
+                conn.close()
+                return None
+            
+            image_id, rating, width, height = result
+            
+            # Get image tags
+            cursor.execute( '''
+                SELECT t.name FROM tags t
+                JOIN image_tags it ON t.id = it.tag_id
+                WHERE it.image_id = ?
+                ORDER BY t.name
+            ''', (image_id,) )
+            tags = [row[0] for row in cursor.fetchall()]
+            
+            conn.close()
+            
+            # Create metadata object
+            metadata = {
+                'id': image_id,
+                'rating': rating or 0,
+                'width': width,
+                'height': height,
+                'tags': tags,
+                'filepath': filepath
+            }
+            
+            # Cache the metadata
+            self.cache_image_metadata( filepath, metadata )
+            
+            return metadata
+            
+        except Exception as e:
+            print( f"Error loading metadata for {filepath}: {e}" )
+            return None
+    
+    def load_all_tags_lazy( self ):
+        """Lazily load all available tags with caching"""
+        # Check cache first
+        cached = self.get_cached_tags()
+        if cached:
+            return cached
+        
+        # Load from database
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get only tags that are actually used by files in the database
+            cursor.execute( """
+                SELECT DISTINCT t.id, t.name 
+                FROM tags t 
+                INNER JOIN image_tags it ON t.id = it.tag_id 
+                INNER JOIN images i ON it.image_id = i.id 
+                ORDER BY t.name
+            """ )
+            tags = cursor.fetchall()
+            
+            conn.close()
+            
+            # Cache the tags
+            self.cache_tags( tags )
+            
+            return tags
+            
+        except Exception as e:
+            print( f"Error loading tags: {e}" )
+            return []
+    
     def set_default_window_geometry( self ):
         """Set default window size and center it on screen"""
         try:
@@ -3216,6 +3401,10 @@ class ImageViewer:
             if result:
                 # Update existing image
                 cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (rating, result[0]) )
+                
+                # Invalidate cache entry for this image so it gets fresh data next time
+                if image_path in self.image_metadata_cache:
+                    del self.image_metadata_cache[image_path]
             else:
                 # Add new image to database
                 try:
