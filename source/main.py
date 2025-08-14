@@ -91,9 +91,16 @@ class ImageViewer:
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
         
-        # Bind double-click and mouse wheel events to preview label
+        # Bind double-click, mouse wheel, and resize events to preview label
         self.browse_preview_label.bind( "<Double-Button-1>", self.on_browse_preview_double_click )
         self.browse_preview_label.bind( "<MouseWheel>", self.on_browse_preview_scroll )
+        self.browse_preview_label.bind( "<Configure>", self.on_browse_preview_resize )
+        
+        # Ensure the label can receive focus for mouse wheel events
+        self.browse_preview_label.bind( "<Enter>", lambda e: self.browse_preview_label.focus_set() )
+        
+        # Also bind mouse wheel to the left frame to catch events
+        left_frame.bind( "<MouseWheel>", self.on_browse_preview_scroll )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -158,8 +165,16 @@ class ImageViewer:
         self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.database_preview_label.pack( fill=tk.BOTH, expand=True )
         
-        # Bind double-click event to preview label
+        # Bind double-click, mouse wheel, and resize events to preview label
         self.database_preview_label.bind( "<Double-Button-1>", self.on_database_preview_double_click )
+        self.database_preview_label.bind( "<MouseWheel>", self.on_database_preview_scroll )
+        self.database_preview_label.bind( "<Configure>", self.on_database_preview_resize )
+        
+        # Ensure the label can receive focus for mouse wheel events
+        self.database_preview_label.bind( "<Enter>", lambda e: self.database_preview_label.focus_set() )
+        
+        # Also bind mouse wheel to the left frame to catch events
+        left_frame.bind( "<MouseWheel>", self.on_database_preview_scroll )
         
         # Right column - Tag filters and image list
         right_frame = ttk.Frame( paned )
@@ -177,16 +192,60 @@ class ImageViewer:
         image_tags_frame = ttk.LabelFrame( top_section, text="Image Tags" )
         image_tags_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0) )
         
-        # Image tags listbox with scrollbar
-        image_tags_list_frame = ttk.Frame( image_tags_frame )
-        image_tags_list_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        # Initialize tag editing variables
+        self.image_tag_checkboxes = {}  # Dictionary to store tag checkbox variables
+        self.selected_image_files = []  # Currently selected files for tag editing
         
-        self.image_tags_listbox = tk.Listbox( image_tags_list_frame, height=6 )
-        image_tags_scrollbar = ttk.Scrollbar( image_tags_list_frame, orient=tk.VERTICAL, command=self.image_tags_listbox.yview )
-        self.image_tags_listbox.configure( yscrollcommand=image_tags_scrollbar.set )
+        # Existing tags section with scrollable checkboxes
+        existing_tags_frame = ttk.LabelFrame( image_tags_frame, text="Existing Tags" )
+        existing_tags_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=(5, 2) )
         
-        self.image_tags_listbox.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
-        image_tags_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        # Scrollable frame for tag checkboxes
+        tag_canvas_frame = ttk.Frame( existing_tags_frame )
+        tag_canvas_frame.pack( fill=tk.BOTH, expand=True, pady=2 )
+        
+        self.image_tag_canvas = tk.Canvas( tag_canvas_frame, height=120 )
+        image_tag_scrollbar = ttk.Scrollbar( tag_canvas_frame, orient=tk.VERTICAL, command=self.image_tag_canvas.yview )
+        self.image_tag_scrollable_frame = ttk.Frame( self.image_tag_canvas )
+        
+        self.image_tag_scrollable_frame.bind( "<Configure>", lambda e: self.image_tag_canvas.configure( scrollregion=self.image_tag_canvas.bbox( "all" ) ) )
+        self.image_tag_canvas.create_window( (0, 0), window=self.image_tag_scrollable_frame, anchor="nw" )
+        self.image_tag_canvas.configure( yscrollcommand=image_tag_scrollbar.set )
+        
+        self.image_tag_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        image_tag_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # Enable mouse wheel scrolling
+        def on_image_tag_canvas_scroll( event ):
+            self.image_tag_canvas.yview_scroll( int( -1 * (event.delta / 120) ), "units" )
+        self.image_tag_canvas.bind( "<MouseWheel>", on_image_tag_canvas_scroll )
+        
+        # New tags section
+        new_tags_frame = ttk.Frame( image_tags_frame )
+        new_tags_frame.pack( fill=tk.X, padx=5, pady=2 )
+        
+        ttk.Label( new_tags_frame, text="Add New Tags:" ).pack( anchor=tk.W )
+        self.image_new_tags_entry = tk.Entry( new_tags_frame )
+        self.image_new_tags_entry.pack( fill=tk.X, pady=(2, 0) )
+        
+        # Bind Enter key to apply new tags
+        self.image_new_tags_entry.bind( "<Return>", lambda e: self.apply_image_tag_changes() )
+        
+        # Rating section
+        rating_frame = ttk.Frame( image_tags_frame )
+        rating_frame.pack( fill=tk.X, padx=5, pady=2 )
+        
+        ttk.Label( rating_frame, text="Rating:" ).pack( anchor=tk.W )
+        self.image_rating_var = tk.IntVar( value=0 )
+        self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.image_rating_var )
+        self.image_rating_scale.pack( fill=tk.X, pady=(2, 0) )
+        
+        # Apply button
+        apply_frame = ttk.Frame( image_tags_frame )
+        apply_frame.pack( fill=tk.X, padx=5, pady=(2, 5) )
+        
+        self.image_apply_button = ttk.Button( apply_frame, text="Apply", command=self.apply_image_tag_changes, state='disabled' )
+        self.image_apply_button.pack( side=tk.RIGHT )
         
         # Create frame for tag filter with proper grid layout
         tag_filter_frame = ttk.Frame( tag_frame )
@@ -254,7 +313,6 @@ class ImageViewer:
         # Bind database image list events
         self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
         self.database_image_listbox.bind( "<Double-1>", self.on_database_image_double_click )
-        self.database_image_listbox.bind( "<Button-3>", self.on_database_image_right_click )
         
         # Initialize tag filters and checkbox tracking
         self.included_or_tags = set()
@@ -501,22 +559,101 @@ class ImageViewer:
                 self.current_browse_image = self.browse_folder_images[self.browse_image_index]
                 self.display_image_preview( self.current_browse_image, self.browse_preview_label )
                 
+    def on_browse_preview_resize( self, event ):
+        """Handle resize events for browse preview label"""
+        # Only process resize events for the label itself, not child widgets
+        if event.widget == self.browse_preview_label:
+            # If there's a current image, redisplay it with the new size
+            if hasattr( self.browse_preview_label, 'current_image_path' ) and self.browse_preview_label.current_image_path:
+                self.display_image_preview( self.browse_preview_label.current_image_path, self.browse_preview_label )
+                
+    def on_database_preview_resize( self, event ):
+        """Handle resize events for database preview label"""
+        # Only process resize events for the label itself, not child widgets
+        if event.widget == self.database_preview_label:
+            # If there's a current image, redisplay it with the new size
+            if hasattr( self.database_preview_label, 'current_image_path' ) and self.database_preview_label.current_image_path:
+                self.display_image_preview( self.database_preview_label.current_image_path, self.database_preview_label )
+                
+    def on_database_preview_scroll( self, event ):
+        """Handle mouse wheel scrolling over database preview image"""
+        if not self.current_database_path:
+            return
+            
+        # Get current selection and total items
+        current_selection = self.database_image_listbox.curselection()
+        total_items = self.database_image_listbox.size()
+        
+        if total_items == 0:
+            return
+            
+        if current_selection:
+            current_index = current_selection[0]
+        else:
+            current_index = 0
+            
+        if event.delta > 0:
+            # Scroll up - previous image (don't wrap)
+            if current_index > 0:
+                new_index = current_index - 1
+            else:
+                return  # Already at first image
+        else:
+            # Scroll down - next image (don't wrap)
+            if current_index < total_items - 1:
+                new_index = current_index + 1
+            else:
+                return  # Already at last image
+                
+        # Select the new item
+        self.database_image_listbox.selection_clear( 0, tk.END )
+        self.database_image_listbox.selection_set( new_index )
+        self.database_image_listbox.see( new_index )  # Ensure it's visible
+        
+        # Trigger the selection event to update preview and tags
+        self.on_database_image_select( None )
+                
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
         try:
             image = Image.open( filepath )
             
-            # Calculate preview size (max 400x400)
-            max_size = 400
-            image.thumbnail( (max_size, max_size), Image.Resampling.LANCZOS )
+            # Get the available space in the label widget
+            label_widget.update_idletasks()  # Ensure geometry is updated
+            available_width = label_widget.winfo_width()
+            available_height = label_widget.winfo_height()
             
-            photo = ImageTk.PhotoImage( image )
+            # Use a minimum size if the widget hasn't been sized yet
+            if available_width <= 1 or available_height <= 1:
+                available_width = 400
+                available_height = 400
+            else:
+                # Leave some padding around the image
+                available_width -= 20
+                available_height -= 20
+                
+            # Calculate the scale factor to fit the image in the available space
+            img_width, img_height = image.size
+            scale_width = available_width / img_width
+            scale_height = available_height / img_height
+            scale_factor = min( scale_width, scale_height )
+            
+            # Calculate new dimensions
+            new_width = int( img_width * scale_factor )
+            new_height = int( img_height * scale_factor )
+            
+            # Resize the image
+            resized_image = image.resize( (new_width, new_height), Image.Resampling.LANCZOS )
+            
+            photo = ImageTk.PhotoImage( resized_image )
             label_widget.configure( image=photo, text="" )
             label_widget.image = photo  # Keep a reference
+            label_widget.current_image_path = filepath  # Store the current image path for resize events
             
         except Exception as e:
             label_widget.configure( image="", text=f"Error loading image:\n{str(e)}" )
             label_widget.image = None
+            label_widget.current_image_path = None
             
     def enter_fullscreen_mode( self, filepath ):
         """Enter fullscreen mode for viewing images"""
@@ -967,7 +1104,7 @@ class ImageViewer:
             self.database_image_listbox.delete( 0, tk.END )
             self.database_preview_label.configure( image="", text="No database open" )
             self.database_preview_label.image = None
-            self.image_tags_listbox.delete( 0, tk.END )
+            self.clear_image_tag_interface()
             return
             
         try:
@@ -1108,7 +1245,7 @@ class ImageViewer:
         selection = self.database_image_listbox.curselection()
         if selection and self.current_database:
             if len( selection ) == 1:
-                # Single selection - show preview and tags
+                # Single selection - show preview and load tags for editing
                 index = selection[0]
                 filename = self.database_image_listbox.get( index )
                 
@@ -1117,14 +1254,319 @@ class ImageViewer:
                 if filepath:
                     self.current_database_image = filepath
                     self.display_image_preview( filepath, self.database_preview_label )
-                    self.display_image_tags( filename )
+                    self.selected_image_files = [filepath]
+                    self.load_image_tags_for_editing()
             else:
-                # Multiple selection - show common tags only
+                # Multiple selection - load tags for bulk editing
                 filenames = [self.database_image_listbox.get( i ) for i in selection]
+                filepaths = [self.find_image_path( f ) for f in filenames]
+                self.selected_image_files = [f for f in filepaths if f]  # Remove None values
                 self.current_database_image = None
                 self.database_preview_label.configure( image="", text=f"{len(selection)} images selected" )
                 self.database_preview_label.image = None
-                self.display_common_tags( filenames )
+                self.load_image_tags_for_editing()
+        else:
+            # No selection - clear tag editing interface
+            self.selected_image_files = []
+            self.clear_image_tag_interface()
+            
+    def load_image_tags_for_editing( self ):
+        """Load tags for the selected images into the editing interface"""
+        if not self.selected_image_files or not self.current_database_path:
+            self.clear_image_tag_interface()
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image IDs and their data
+            image_data = {}
+            ratings = []
+            
+            for filepath in self.selected_image_files:
+                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
+                cursor.execute( "SELECT id, rating FROM images WHERE relative_path = ?", (relative_path,) )
+                result = cursor.fetchone()
+                
+                if result:
+                    image_data[filepath] = {'id': result[0], 'rating': result[1] or 0}
+                    ratings.append( result[1] or 0 )
+            
+            if not image_data:
+                self.clear_image_tag_interface()
+                return
+                
+            # Handle ratings
+            if ratings:
+                if len( set( ratings ) ) == 1:
+                    # All same rating
+                    self.image_rating_var.set( ratings[0] )
+                    self.image_rating_scale.configure( state='normal' )
+                else:
+                    # Different ratings - grey out scale
+                    self.image_rating_scale.configure( state='disabled' )
+                    self.image_rating_var.set( 0 )
+            
+            # Get only tags that are actually used by files in the database
+            cursor.execute( """
+                SELECT DISTINCT t.id, t.name 
+                FROM tags t 
+                INNER JOIN image_tags it ON t.id = it.tag_id 
+                INNER JOIN images i ON it.image_id = i.id 
+                ORDER BY t.name
+            """ )
+            all_tags = cursor.fetchall()
+            
+            # For each tag, count how many selected images have it
+            tag_counts = {}
+            total_images = len( image_data )
+            
+            for tag_id, tag_name in all_tags:
+                # Count how many of the selected images have this tag
+                placeholders = ','.join( ['?' for _ in image_data.values()] )
+                query = f"""
+                    SELECT COUNT(*) FROM image_tags 
+                    WHERE tag_id = ? AND image_id IN ({placeholders})
+                """
+                params = [tag_id] + [img['id'] for img in image_data.values()]
+                cursor.execute( query, params )
+                count = cursor.fetchone()[0]
+                tag_counts[tag_id] = count
+                
+            # Clear existing checkboxes
+            for widget in self.image_tag_scrollable_frame.winfo_children():
+                widget.destroy()
+            self.image_tag_checkboxes.clear()
+            
+            # Create checkboxes for each tag
+            for tag_id, tag_name in all_tags:
+                count = tag_counts[tag_id]
+                
+                # Create frame for this tag
+                tag_frame = ttk.Frame( self.image_tag_scrollable_frame )
+                tag_frame.pack( fill=tk.X, pady=1 )
+                
+                if count == total_images:
+                    # All images have this tag - normal checked checkbox
+                    tag_var = tk.BooleanVar( value=True )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var,
+                                             command=lambda tid=tag_id: self.on_image_tag_changed( tid ) )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.image_tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'common',
+                        'frame': tag_frame
+                    }
+                elif count > 0:
+                    # Some images have this tag - greyed out checkbox
+                    tag_var = tk.BooleanVar( value=False )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var, 
+                                             fg='grey', selectcolor='lightgrey',
+                                             command=lambda tid=tag_id: self.on_image_partial_checkbox_clicked( tid ) )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.image_tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'partial',
+                        'frame': tag_frame
+                    }
+                else:
+                    # No images have this tag - normal unchecked checkbox
+                    tag_var = tk.BooleanVar( value=False )
+                    checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=tag_var,
+                                             command=lambda tid=tag_id: self.on_image_tag_changed( tid ) )
+                    checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                    
+                    self.image_tag_checkboxes[tag_id] = {
+                        'var': tag_var,
+                        'name': tag_name,
+                        'checkbox': checkbox,
+                        'state': 'none',
+                        'frame': tag_frame
+                    }
+            
+            # Enable apply button
+            self.image_apply_button.configure( state='normal' )
+            
+            conn.close()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to load tags for editing: {str(e)}" )
+            self.clear_image_tag_interface()
+            
+    def clear_image_tag_interface( self ):
+        """Clear the tag editing interface"""
+        # Clear checkboxes
+        for widget in self.image_tag_scrollable_frame.winfo_children():
+            widget.destroy()
+        self.image_tag_checkboxes.clear()
+        
+        # Clear new tags entry
+        self.image_new_tags_entry.delete( 0, tk.END )
+        
+        # Reset rating
+        self.image_rating_var.set( 0 )
+        self.image_rating_scale.configure( state='normal' )
+        
+        # Disable apply button
+        self.image_apply_button.configure( state='disabled' )
+        
+    def on_image_partial_checkbox_clicked( self, tag_id ):
+        """Handle clicking on a greyed out (partial) checkbox in the image tags interface"""
+        if tag_id in self.image_tag_checkboxes and self.image_tag_checkboxes[tag_id]['state'] == 'partial':
+            tag_data = self.image_tag_checkboxes[tag_id]
+            tag_name = tag_data['name']
+            tag_frame = tag_data['frame']
+            current_value = tag_data['var'].get()
+            
+            # Destroy the old greyed checkbox
+            tag_data['checkbox'].destroy()
+            
+            # Create a new normal checkbox with the current state
+            new_var = tk.BooleanVar( value=current_value )
+            new_checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=new_var,
+                                         command=lambda tid=tag_id: self.on_image_tag_changed( tid ) )
+            new_checkbox.pack( side=tk.LEFT, anchor=tk.W )
+            
+            # Update the stored data
+            self.image_tag_checkboxes[tag_id] = {
+                'var': new_var,
+                'name': tag_name,
+                'checkbox': new_checkbox,
+                'state': 'common' if current_value else 'none',
+                'frame': tag_frame
+            }
+            
+            # Apply the change immediately
+            self.apply_single_tag_change( tag_id, current_value )
+            
+    def on_image_tag_changed( self, tag_id ):
+        """Handle immediate tag checkbox changes"""
+        if tag_id in self.image_tag_checkboxes:
+            tag_data = self.image_tag_checkboxes[tag_id]
+            is_checked = tag_data['var'].get()
+            self.apply_single_tag_change( tag_id, is_checked )
+            
+    def apply_single_tag_change( self, tag_id, is_checked ):
+        """Apply a single tag change immediately to selected images"""
+        if not self.selected_image_files or not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image IDs for the selected files
+            image_ids = []
+            for filepath in self.selected_image_files:
+                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
+                cursor.execute( "SELECT id FROM images WHERE relative_path = ?", (relative_path,) )
+                result = cursor.fetchone()
+                if result:
+                    image_ids.append( result[0] )
+            
+            if not image_ids:
+                conn.close()
+                return
+                
+            # Apply the tag change
+            for image_id in image_ids:
+                if is_checked:
+                    # Add tag to image
+                    cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
+                                  (image_id, tag_id) )
+                else:
+                    # Remove tag from image
+                    cursor.execute( "DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?", 
+                                  (image_id, tag_id) )
+            
+            conn.commit()
+            conn.close()
+            
+            # Refresh views to reflect changes
+            self.refresh_database_view()
+            self.refresh_filtered_images()
+            
+        except Exception as e:
+            print( f"Error applying tag change: {e}" )
+            
+    def apply_image_tag_changes( self ):
+        """Apply new tags and rating changes to the selected images"""
+        if not self.selected_image_files or not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image IDs for the selected files
+            image_data = {}
+            for filepath in self.selected_image_files:
+                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
+                cursor.execute( "SELECT id FROM images WHERE relative_path = ?", (relative_path,) )
+                result = cursor.fetchone()
+                if result:
+                    image_data[filepath] = {'id': result[0]}
+            
+            if not image_data:
+                messagebox.showerror( "Error", "No valid images found in database" )
+                return
+                
+            changes_made = False
+            
+            # Update ratings if scale is enabled
+            if self.image_rating_scale['state'] != 'disabled':
+                rating = self.image_rating_var.get()
+                for img_data in image_data.values():
+                    cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (rating, img_data['id']) )
+                changes_made = True
+            
+            # Add new tags (existing tag checkboxes are handled immediately)
+            new_tags_text = self.image_new_tags_entry.get().strip()
+            if new_tags_text:
+                new_tags = [tag.strip() for tag in new_tags_text.split( ',' ) if tag.strip()]
+                
+                for tag_name in new_tags:
+                    # Insert tag if it doesn't exist
+                    cursor.execute( "INSERT OR IGNORE INTO tags (name) VALUES (?)", (tag_name,) )
+                    
+                    # Get tag ID
+                    cursor.execute( "SELECT id FROM tags WHERE name = ?", (tag_name,) )
+                    tag_id = cursor.fetchone()[0]
+                    
+                    # Add tag to all selected images
+                    for img_data in image_data.values():
+                        cursor.execute( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
+                                      (img_data['id'], tag_id) )
+                changes_made = True
+            
+            if changes_made:
+                conn.commit()
+                
+                # Clear new tags entry
+                self.image_new_tags_entry.delete( 0, tk.END )
+                
+                # Refresh views
+                self.refresh_database_view()
+                self.refresh_filtered_images()
+                
+                # Reload the tag editing interface to reflect changes
+                self.load_image_tags_for_editing()
+                
+                messagebox.showinfo( "Success", f"Changes applied to {len(self.selected_image_files)} image(s)" )
+            else:
+                messagebox.showinfo( "Info", "No changes to apply" )
+            
+            conn.close()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to apply changes: {str(e)}" )
                 
     def on_database_image_double_click( self, event ):
         """Handle double click in database image list"""
@@ -1137,32 +1579,7 @@ class ImageViewer:
             if filepath:
                 self.enter_fullscreen_mode( filepath )
                 
-    def on_database_image_right_click( self, event ):
-        """Handle right click in database image list"""
-        # Get the item under the cursor
-        index = self.database_image_listbox.nearest( event.y )
-        if index >= 0:
-            # If the clicked item is not in current selection, select only it
-            if index not in self.database_image_listbox.curselection():
-                self.database_image_listbox.selection_clear( 0, tk.END )
-                self.database_image_listbox.selection_set( index )
-            
-            # Get all selected items
-            selection = self.database_image_listbox.curselection()
-            if selection:
-                if len( selection ) == 1:
-                    # Single file
-                    filename = self.database_image_listbox.get( selection[0] )
-                    filepath = self.find_image_path( filename )
-                    if filepath:
-                        self.show_tag_dialog( filepath )
-                else:
-                    # Multiple files
-                    filenames = [self.database_image_listbox.get( i ) for i in selection]
-                    filepaths = [self.find_image_path( f ) for f in filenames]
-                    filepaths = [f for f in filepaths if f]  # Remove None values
-                    if filepaths:
-                        self.show_multi_tag_dialog( filepaths )
+
                 
     def on_database_preview_double_click( self, event ):
         """Handle double click on database preview image"""
@@ -1189,100 +1606,9 @@ class ImageViewer:
             
         return None
         
-    def display_image_tags( self, filename ):
-        """Display tags for the selected image in the Image Tags frame"""
-        self.image_tags_listbox.delete( 0, tk.END )
-        
-        if not self.current_database_path:
-            return
+
             
-        try:
-            conn = sqlite3.connect( self.current_database_path )
-            cursor = conn.cursor()
-            
-            # Get image ID and tags
-            cursor.execute( '''
-                SELECT i.id, t.name, i.rating
-                FROM images i
-                LEFT JOIN image_tags it ON i.id = it.image_id
-                LEFT JOIN tags t ON it.tag_id = t.id
-                WHERE i.filename = ?
-                ORDER BY t.name
-            ''', (filename,) )
-            
-            results = cursor.fetchall()
-            conn.close()
-            
-            if results:
-                # Get rating (same for all rows)
-                rating = results[0][2] or 0
-                
-                # Add rating to the list
-                self.image_tags_listbox.insert( tk.END, f"Rating: {rating}/10" )
-                
-                # Add separator
-                self.image_tags_listbox.insert( tk.END, "─────────────" )
-                
-                # Add tags
-                tags_found = False
-                for row in results:
-                    if row[1]:  # If tag name exists
-                        self.image_tags_listbox.insert( tk.END, row[1] )
-                        tags_found = True
-                        
-                if not tags_found:
-                    self.image_tags_listbox.insert( tk.END, "(no tags)" )
-            else:
-                self.image_tags_listbox.insert( tk.END, "(image not in database)" )
-                
-        except Exception as e:
-            self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
-            
-    def display_common_tags( self, filenames ):
-        """Display tags that are common to all selected images"""
-        self.image_tags_listbox.delete( 0, tk.END )
-        
-        if not self.current_database_path or not filenames:
-            return
-            
-        try:
-            conn = sqlite3.connect( self.current_database_path )
-            cursor = conn.cursor()
-            
-            # Get all tags for each selected image
-            all_image_tags = {}
-            for filename in filenames:
-                cursor.execute( '''
-                    SELECT t.name
-                    FROM images i
-                    LEFT JOIN image_tags it ON i.id = it.image_id
-                    LEFT JOIN tags t ON it.tag_id = t.id
-                    WHERE i.filename = ? AND t.name IS NOT NULL
-                ''', (filename,) )
-                
-                tags = {row[0] for row in cursor.fetchall()}
-                all_image_tags[filename] = tags
-                
-            # Find common tags (intersection of all sets)
-            if all_image_tags:
-                common_tags = set.intersection( *all_image_tags.values() ) if all_image_tags.values() else set()
-                
-                self.image_tags_listbox.insert( tk.END, f"{len(filenames)} images selected" )
-                self.image_tags_listbox.insert( tk.END, "─────────────" )
-                
-                if common_tags:
-                    self.image_tags_listbox.insert( tk.END, "Common tags:" )
-                    for tag in sorted( common_tags ):
-                        self.image_tags_listbox.insert( tk.END, f"  {tag}" )
-                else:
-                    self.image_tags_listbox.insert( tk.END, "(no common tags)" )
-            else:
-                self.image_tags_listbox.insert( tk.END, "(no tags found)" )
-                
-            conn.close()
-            
-        except Exception as e:
-            self.image_tags_listbox.insert( tk.END, f"Error: {str(e)}" )
+
         
     def on_all_include_or_changed( self ):
         """Handle 'all' include (OR) checkbox change"""
