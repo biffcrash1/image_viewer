@@ -9,10 +9,14 @@
     "y": 155
   },
   "active_tab": "database",
-  "current_database": "E:\\Data\\_Nates_Stuff\\Photos\\2015-03-15_baby_shower\\baby1.db",
+  "current_database": "E:\\Data\\_Nates_Stuff\\Photos\\Wallpapers\\wall1.db",
   "recent_databases": [
-    "E:\\Data\\_Nates_Stuff\\Photos\\2015-03-15_baby_shower\\baby1.db",
     "E:\\Data\\_Nates_Stuff\\Photos\\Wallpapers\\wall1.db",
+    "E:\\Data\\_Nates_Stuff\\Photos\\2015-03-15_baby_shower\\baby1.db",
     "E:/Data/_Nates_Stuff/Photos/2002_Subaru_WRX/subie1.db"
-  ]
+  ],
+  "rating_filter": {
+    "min": 0,
+    "max": 10
+  }
 }

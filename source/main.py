@@ -35,6 +35,7 @@ class ImageViewer:
         self.browse_image_index = 0
         self.settings_file = "settings.json"
         self.current_browse_directory = None
+        self._rating_repeat_timer = None # For long press arrow key rating changes
         
         # Supported image formats
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
@@ -102,12 +103,33 @@ class ImageViewer:
         self.browse_preview_label.bind( "<Double-Button-1>", self.on_browse_preview_double_click )
         self.browse_preview_label.bind( "<MouseWheel>", self.on_browse_preview_scroll )
         self.browse_preview_label.bind( "<Configure>", self.on_browse_preview_resize )
+        self.browse_preview_label.bind( "<Button-1>", lambda e: self.browse_preview_label.focus_set() )
         
-        # Ensure the label can receive focus for mouse wheel events
+        # Ensure the label can receive focus for mouse wheel events and keyboard shortcuts
         self.browse_preview_label.bind( "<Enter>", lambda e: self.browse_preview_label.focus_set() )
+        # Make label focusable
+        self.browse_preview_label.config( takefocus=True )
         
         # Also bind mouse wheel to the left frame to catch events
         left_frame.bind( "<MouseWheel>", self.on_browse_preview_scroll )
+        
+        # Add keyboard rating shortcuts for browse preview
+        self.browse_preview_label.bind( "<Key-1>", lambda e: self.rate_current_browse_image( 1 ) )
+        self.browse_preview_label.bind( "<Key-2>", lambda e: self.rate_current_browse_image( 2 ) )
+        self.browse_preview_label.bind( "<Key-3>", lambda e: self.rate_current_browse_image( 3 ) )
+        self.browse_preview_label.bind( "<Key-4>", lambda e: self.rate_current_browse_image( 4 ) )
+        self.browse_preview_label.bind( "<Key-5>", lambda e: self.rate_current_browse_image( 5 ) )
+        self.browse_preview_label.bind( "<Key-6>", lambda e: self.rate_current_browse_image( 6 ) )
+        self.browse_preview_label.bind( "<Key-7>", lambda e: self.rate_current_browse_image( 7 ) )
+        self.browse_preview_label.bind( "<Key-8>", lambda e: self.rate_current_browse_image( 8 ) )
+        self.browse_preview_label.bind( "<Key-9>", lambda e: self.rate_current_browse_image( 9 ) )
+        self.browse_preview_label.bind( "<Key-0>", lambda e: self.rate_current_browse_image( 10 ) )
+        self.browse_preview_label.bind( "<Key-Left>", lambda e: self.adjust_current_browse_rating( -1 ) )
+        self.browse_preview_label.bind( "<Key-Right>", lambda e: self.adjust_current_browse_rating( 1 ) )
+        self.browse_preview_label.bind( "<KeyPress-Left>", self.on_rating_arrow_press )
+        self.browse_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
+        self.browse_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
+        self.browse_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -188,12 +210,33 @@ class ImageViewer:
         self.database_preview_label.bind( "<Double-Button-1>", self.on_database_preview_double_click )
         self.database_preview_label.bind( "<MouseWheel>", self.on_database_preview_scroll )
         self.database_preview_label.bind( "<Configure>", self.on_database_preview_resize )
+        self.database_preview_label.bind( "<Button-1>", lambda e: self.database_preview_label.focus_set() )
         
-        # Ensure the label can receive focus for mouse wheel events
+        # Ensure the label can receive focus for mouse wheel events and keyboard shortcuts
         self.database_preview_label.bind( "<Enter>", lambda e: self.database_preview_label.focus_set() )
+        # Make label focusable
+        self.database_preview_label.config( takefocus=True )
         
         # Also bind mouse wheel to the left frame to catch events
         left_frame.bind( "<MouseWheel>", self.on_database_preview_scroll )
+        
+        # Add keyboard rating shortcuts for database preview
+        self.database_preview_label.bind( "<Key-1>", lambda e: self.rate_current_database_image( 1 ) )
+        self.database_preview_label.bind( "<Key-2>", lambda e: self.rate_current_database_image( 2 ) )
+        self.database_preview_label.bind( "<Key-3>", lambda e: self.rate_current_database_image( 3 ) )
+        self.database_preview_label.bind( "<Key-4>", lambda e: self.rate_current_database_image( 4 ) )
+        self.database_preview_label.bind( "<Key-5>", lambda e: self.rate_current_database_image( 5 ) )
+        self.database_preview_label.bind( "<Key-6>", lambda e: self.rate_current_database_image( 6 ) )
+        self.database_preview_label.bind( "<Key-7>", lambda e: self.rate_current_database_image( 7 ) )
+        self.database_preview_label.bind( "<Key-8>", lambda e: self.rate_current_database_image( 8 ) )
+        self.database_preview_label.bind( "<Key-9>", lambda e: self.rate_current_database_image( 9 ) )
+        self.database_preview_label.bind( "<Key-0>", lambda e: self.rate_current_database_image( 10 ) )
+        self.database_preview_label.bind( "<Key-Left>", lambda e: self.adjust_current_database_rating( -1 ) )
+        self.database_preview_label.bind( "<Key-Right>", lambda e: self.adjust_current_database_rating( 1 ) )
+        self.database_preview_label.bind( "<KeyPress-Left>", self.on_rating_arrow_press )
+        self.database_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
+        self.database_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
+        self.database_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
         
         # Right column - Tag filters and image list
         right_frame = ttk.Frame( paned )
@@ -250,8 +293,13 @@ class ImageViewer:
         
         ttk.Label( rating_frame, text="Rating:" ).pack( anchor=tk.W )
         self.image_rating_var = tk.IntVar( value=0 )
-        self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, variable=self.image_rating_var )
+        self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, 
+                                           variable=self.image_rating_var, 
+                                           command=self.on_image_rating_changed )
         self.image_rating_scale.pack( fill=tk.X, pady=(2, 0) )
+        
+        # Override click behavior to jump to position instead of increment/decrement
+        self.image_rating_scale.bind( "<Button-1>", self.on_rating_scale_click )
         
         # New tags section - pack at bottom before Rating
         new_tags_frame = ttk.Frame( image_tags_frame )
@@ -281,19 +329,41 @@ class ImageViewer:
         tag_filter_frame.grid_columnconfigure( 2, minsize=60 )  # Exclude column  
         tag_filter_frame.grid_columnconfigure( 3, weight=1 )    # Tag name column
         
-        # Headers
-        ttk.Label( tag_filter_frame, text="Include (OR)" ).grid( row=0, column=0, sticky="w", padx=5, pady=2 )
-        ttk.Label( tag_filter_frame, text="Include (AND)" ).grid( row=0, column=1, sticky="w", padx=5, pady=2 )
-        ttk.Label( tag_filter_frame, text="Exclude" ).grid( row=0, column=2, sticky="w", padx=5, pady=2 )
-        ttk.Label( tag_filter_frame, text="Tag Name" ).grid( row=0, column=3, sticky="w", padx=5, pady=2 )
+        # Rating filter section
+        rating_filter_frame = ttk.Frame( tag_filter_frame )
+        rating_filter_frame.grid( row=0, column=0, columnspan=4, sticky="ew", padx=5, pady=(0, 5) )
         
-        # Separator line
+        ttk.Label( rating_filter_frame, text="Rating Filter:" ).pack( side=tk.LEFT, padx=(0, 10) )
+        
+        # Min rating
+        ttk.Label( rating_filter_frame, text="Min:" ).pack( side=tk.LEFT, padx=(0, 5) )
+        self.min_rating_var = tk.IntVar( value=0 )
+        self.min_rating_scale = tk.Scale( rating_filter_frame, from_=0, to=10, orient=tk.HORIZONTAL, 
+                                         variable=self.min_rating_var, length=80,
+                                         command=self.on_rating_filter_changed )
+        self.min_rating_scale.pack( side=tk.LEFT, padx=(0, 10) )
+        
+        # Max rating  
+        ttk.Label( rating_filter_frame, text="Max:" ).pack( side=tk.LEFT, padx=(0, 5) )
+        self.max_rating_var = tk.IntVar( value=10 )
+        self.max_rating_scale = tk.Scale( rating_filter_frame, from_=0, to=10, orient=tk.HORIZONTAL,
+                                         variable=self.max_rating_var, length=80,
+                                         command=self.on_rating_filter_changed )
+        self.max_rating_scale.pack( side=tk.LEFT, padx=(0, 10) )
+        
+        # Rating separator
         ttk.Separator( tag_filter_frame, orient='horizontal' ).grid( row=1, column=0, columnspan=4, sticky="ew", pady=2 )
+        
+        # Headers
+        ttk.Label( tag_filter_frame, text="Include (OR)" ).grid( row=2, column=0, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Include (AND)" ).grid( row=2, column=1, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Exclude" ).grid( row=2, column=2, sticky="w", padx=5, pady=2 )
+        ttk.Label( tag_filter_frame, text="Tag Name" ).grid( row=2, column=3, sticky="w", padx=5, pady=2 )
         
         # Scrollable frame for tag rows
         canvas_frame = ttk.Frame( tag_filter_frame )
-        canvas_frame.grid( row=2, column=0, columnspan=4, sticky="nsew", pady=5 )
-        tag_filter_frame.grid_rowconfigure( 2, weight=1 )
+        canvas_frame.grid( row=3, column=0, columnspan=4, sticky="nsew", pady=5 )
+        tag_filter_frame.grid_rowconfigure( 3, weight=1 )
         
         self.tag_canvas = tk.Canvas( canvas_frame, height=150 )
         self.tag_canvas.configure( highlightthickness=0 )  # Remove border
@@ -841,6 +911,22 @@ class ImageViewer:
         self.fullscreen_window.bind( "<Key-Right>", self.on_fullscreen_next )
         self.fullscreen_window.bind( "<Key-Escape>", self.exit_fullscreen_mode )
         
+        # Add rating shortcuts to fullscreen mode
+        self.fullscreen_window.bind( "<Key-1>", lambda e: self.rate_current_fullscreen_image( 1 ) )
+        self.fullscreen_window.bind( "<Key-2>", lambda e: self.rate_current_fullscreen_image( 2 ) )
+        self.fullscreen_window.bind( "<Key-3>", lambda e: self.rate_current_fullscreen_image( 3 ) )
+        self.fullscreen_window.bind( "<Key-4>", lambda e: self.rate_current_fullscreen_image( 4 ) )
+        self.fullscreen_window.bind( "<Key-5>", lambda e: self.rate_current_fullscreen_image( 5 ) )
+        self.fullscreen_window.bind( "<Key-6>", lambda e: self.rate_current_fullscreen_image( 6 ) )
+        self.fullscreen_window.bind( "<Key-7>", lambda e: self.rate_current_fullscreen_image( 7 ) )
+        self.fullscreen_window.bind( "<Key-8>", lambda e: self.rate_current_fullscreen_image( 8 ) )
+        self.fullscreen_window.bind( "<Key-9>", lambda e: self.rate_current_fullscreen_image( 9 ) )
+        self.fullscreen_window.bind( "<Key-0>", lambda e: self.rate_current_fullscreen_image( 10 ) )
+        
+        # Use Ctrl+Left/Right for rating adjustment in fullscreen to avoid conflict with navigation
+        self.fullscreen_window.bind( "<Control-Key-Left>", lambda e: self.adjust_current_fullscreen_rating( -1 ) )
+        self.fullscreen_window.bind( "<Control-Key-Right>", lambda e: self.adjust_current_fullscreen_rating( 1 ) )
+        
         self.fullscreen_window.focus_set()
         
         # Display current image
@@ -1371,17 +1457,31 @@ class ImageViewer:
         except Exception as e:
             print( f"Error refreshing database view: {e}" )
             
-    def refresh_filtered_images( self ):
+    def refresh_filtered_images( self, preserve_selection=None ):
         """Refresh the filtered image list based on current tag filters"""
         if not self.current_database_path:
             return
+        
+        # Store current selection if not provided
+        if preserve_selection is None and hasattr( self, 'database_image_listbox' ):
+            current_selection = list( self.database_image_listbox.curselection() )
+            preserve_selection = []
+            for index in current_selection:
+                preserve_selection.append( self.database_image_listbox.get( index ) )
             
         try:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
-            # Build complex query for OR/AND/EXCLUDE logic
-            if not self.included_or_tags and not self.included_and_tags and not self.excluded_tags:
+            # Get rating filter values
+            min_rating = self.min_rating_var.get()
+            max_rating = self.max_rating_var.get()
+            
+            # Build complex query for OR/AND/EXCLUDE logic plus rating filter
+            has_tag_filters = self.included_or_tags or self.included_and_tags or self.excluded_tags
+            has_rating_filter = min_rating > 0 or max_rating < 10
+            
+            if not has_tag_filters and not has_rating_filter:
                 # No filters - show all images
                 query = "SELECT DISTINCT i.relative_path, i.filename FROM images i ORDER BY i.filename"
                 params = []
@@ -1389,6 +1489,11 @@ class ImageViewer:
                 # Start with all images
                 query = "SELECT DISTINCT i.relative_path, i.filename FROM images i WHERE 1=1"
                 params = []
+                
+                # Apply rating filter
+                if has_rating_filter:
+                    query += " AND i.rating >= ? AND i.rating <= ?"
+                    params.extend( [min_rating, max_rating] )
                 
                 # Apply EXCLUDE filter (highest priority - exclude any image with excluded tags)
                 if self.excluded_tags:
@@ -1425,36 +1530,69 @@ class ImageViewer:
             for relative_path, filename in images:
                 self.database_image_listbox.insert( tk.END, filename )
                 
-            # Check if currently previewed image is still in the filtered list
-            current_filename = None
-            if self.current_database_image:
-                current_filename = os.path.basename( self.current_database_image )
-                
-            # Check if current image is in the new filtered list
+            # Handle selection restoration
             filtered_filenames = [filename for relative_path, filename in images]
             
-            if current_filename and current_filename in filtered_filenames:
-                # Current image is still in filtered list - select it
-                try:
-                    current_index = filtered_filenames.index( current_filename )
-                    self.database_image_listbox.selection_set( current_index )
-                    self.database_image_listbox.see( current_index )
-                except ValueError:
-                    pass  # Shouldn't happen, but just in case
-            elif filtered_filenames:
-                # Current image is not in filtered list or no current image - select first image
-                self.database_image_listbox.selection_set( 0 )
-                self.database_image_listbox.see( 0 )
+            # If we have a preserved selection, try to restore it
+            if preserve_selection and filtered_filenames:
+                # Temporarily unbind the select event to prevent interference
+                self.database_image_listbox.unbind( "<<ListboxSelect>>" )
                 
-                # Update preview to show first image
-                first_filename = filtered_filenames[0]
-                first_filepath = self.find_image_path( first_filename )
-                if first_filepath:
-                    self.current_database_image = first_filepath
-                    self.display_image_preview( first_filepath, self.database_preview_label )
-                    self.selected_image_files = [first_filepath]
-                    self.load_image_tags_for_editing()
-            else:
+                self.database_image_listbox.selection_clear( 0, tk.END )
+                restored_any = False
+                
+                for filename in preserve_selection:
+                    if filename in filtered_filenames:
+                        try:
+                            index = filtered_filenames.index( filename )
+                            self.database_image_listbox.selection_set( index )
+                            restored_any = True
+                        except ValueError:
+                            pass
+                
+                if restored_any:
+                    # Ensure the first selected item is visible
+                    first_selected = self.database_image_listbox.curselection()
+                    if first_selected:
+                        self.database_image_listbox.see( first_selected[0] )
+                else:
+                    # None of the preserved selection is in filtered list - select first
+                    if filtered_filenames:
+                        self.database_image_listbox.selection_set( 0 )
+                        self.database_image_listbox.see( 0 )
+                
+                # Re-bind the select event
+                self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
+                
+            elif filtered_filenames and not preserve_selection:
+                # No preserved selection - use smart preview logic
+                current_filename = None
+                if self.current_database_image:
+                    current_filename = os.path.basename( self.current_database_image )
+                    
+                if current_filename and current_filename in filtered_filenames:
+                    # Current image is still in filtered list - select it
+                    try:
+                        current_index = filtered_filenames.index( current_filename )
+                        self.database_image_listbox.selection_set( current_index )
+                        self.database_image_listbox.see( current_index )
+                    except ValueError:
+                        pass
+                else:
+                    # Current image is not in filtered list - select first image
+                    self.database_image_listbox.selection_set( 0 )
+                    self.database_image_listbox.see( 0 )
+                    
+                    # Update preview to show first image
+                    first_filename = filtered_filenames[0]
+                    first_filepath = self.find_image_path( first_filename )
+                    if first_filepath:
+                        self.current_database_image = first_filepath
+                        self.display_image_preview( first_filepath, self.database_preview_label )
+                        self.selected_image_files = [first_filepath]
+                        self.load_image_tags_for_editing()
+            
+            if not filtered_filenames:
                 # No images in filtered list - clear preview
                 self.current_database_image = None
                 self.database_preview_label.configure( image="", text="No images match filters" )
@@ -1723,8 +1861,65 @@ class ImageViewer:
         except Exception as e:
             print( f"Error applying tag change: {e}" )
             
+    def on_rating_scale_click( self, event ):
+        """Handle mouse click on rating scale to jump to position"""
+        # Calculate the clicked position as a rating value
+        scale_width = self.image_rating_scale.winfo_width()
+        click_x = event.x
+        
+        # Calculate rating based on click position (0-10 range)
+        if scale_width > 0:
+            rating = round( (click_x / scale_width) * 10 )
+            rating = max( 0, min( 10, rating ) )  # Clamp to valid range
+            
+            # Set the slider position and trigger the rating change
+            self.image_rating_var.set( rating )
+            self.on_image_rating_changed( str( rating ) )
+    
+    def on_image_rating_changed( self, value=None ):
+        """Handle immediate rating changes in the Image Tags frame"""
+        if not self.current_database_path or not self.selected_image_files:
+            return
+        
+        # Don't apply if slider is disabled (mixed ratings)
+        if self.image_rating_scale['state'] == 'disabled':
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            rating = self.image_rating_var.get()
+            
+            # Get image IDs and update ratings
+            for filepath in self.selected_image_files:
+                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
+                cursor.execute( "UPDATE images SET rating = ? WHERE relative_path = ?", (rating, relative_path) )
+            
+            conn.commit()
+            
+            # Only refresh if rating filters are actually active, otherwise skip refresh entirely
+            min_rating = self.min_rating_var.get()
+            max_rating = self.max_rating_var.get()
+            has_rating_filter = min_rating > 0 or max_rating < 10
+            
+            if has_rating_filter:
+                # Rating filters are active, so we need to refresh to update the filtered list
+                current_selection_indices = list( self.database_image_listbox.curselection() )
+                current_filenames = []
+                for index in current_selection_indices:
+                    current_filenames.append( self.database_image_listbox.get( index ) )
+                
+                self.refresh_filtered_images( preserve_selection=current_filenames )
+            # If no rating filters are active, no need to refresh at all - selection will stay stable
+            
+        except Exception as e:
+            print( f"Error updating image rating: {e}" )
+        finally:
+            conn.close()
+    
     def apply_image_tag_changes( self ):
-        """Apply new tags and rating changes to the selected images"""
+        """Apply new tags to selected images (rating changes are now immediate)"""
         if not self.selected_image_files or not self.current_database_path:
             return
             
@@ -1747,14 +1942,7 @@ class ImageViewer:
                 
             changes_made = False
             
-            # Update ratings if scale is enabled
-            if self.image_rating_scale['state'] != 'disabled':
-                rating = self.image_rating_var.get()
-                for img_data in image_data.values():
-                    cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (rating, img_data['id']) )
-                changes_made = True
-            
-            # Add new tags (existing tag checkboxes are handled immediately)
+            # Add new tags (existing tag checkboxes and rating changes are handled immediately)
             new_tags_text = self.image_new_tags_entry.get().strip()
             if new_tags_text:
                 new_tags = [tag.strip() for tag in new_tags_text.split( ',' ) if tag.strip()]
@@ -1946,11 +2134,31 @@ class ImageViewer:
             
         self.refresh_filtered_images()
         
+    def on_rating_filter_changed( self, value=None ):
+        """Handle rating filter changes"""
+        # Ensure min <= max
+        min_val = self.min_rating_var.get()
+        max_val = self.max_rating_var.get()
+        
+        if min_val > max_val:
+            if value and value == str(min_val):
+                # User changed min, adjust max
+                self.max_rating_var.set( min_val )
+            else:
+                # User changed max, adjust min
+                self.min_rating_var.set( max_val )
+        
+        self.refresh_filtered_images()
+    
     def clear_filters( self ):
-        """Clear all tag filters"""
+        """Clear all tag filters and reset rating filters"""
         self.included_or_tags.clear()
         self.included_and_tags.clear()
         self.excluded_tags.clear()
+        
+        # Reset rating filters to full range
+        self.min_rating_var.set( 0 )
+        self.max_rating_var.set( 10 )
         
         # Clear all checkboxes
         self.all_include_or_var.set( False )
@@ -2164,6 +2372,13 @@ class ImageViewer:
             else:
                 # No database currently open
                 settings['current_database'] = None
+            
+            # Save rating filter values
+            if hasattr( self, 'min_rating_var' ) and hasattr( self, 'max_rating_var' ):
+                settings['rating_filter'] = {
+                    'min': self.min_rating_var.get(),
+                    'max': self.max_rating_var.get()
+                }
                 
         except Exception as e:
             print( f"Error saving current database: {e}" )
@@ -2369,11 +2584,35 @@ class ImageViewer:
         except Exception as e:
             print( f"Error prompting for database restore: {e}" )
     
+    def restore_rating_filters( self ):
+        """Restore rating filter values from settings"""
+        try:
+            if not os.path.exists( self.settings_file ):
+                return
+                
+            with open( self.settings_file, 'r' ) as f:
+                settings = json.load( f )
+            
+            rating_filter = settings.get( 'rating_filter' )
+            if rating_filter and hasattr( self, 'min_rating_var' ) and hasattr( self, 'max_rating_var' ):
+                min_val = rating_filter.get( 'min', 0 )
+                max_val = rating_filter.get( 'max', 10 )
+                
+                # Validate values
+                if 0 <= min_val <= 10 and 0 <= max_val <= 10 and min_val <= max_val:
+                    self.min_rating_var.set( min_val )
+                    self.max_rating_var.set( max_val )
+                    
+        except Exception as e:
+            print( f"Error restoring rating filters: {e}" )
+    
     def complete_startup( self ):
         """Mark startup as complete to enable state saving"""
         self.startup_complete = True
         # Update recent databases dropdown after startup
         self.update_recent_databases_dropdown()
+        # Restore rating filters
+        self.restore_rating_filters()
         # Prompt to restore database after a short delay
         self.root.after( 500, self.prompt_restore_database )
     
@@ -2499,6 +2738,214 @@ class ImageViewer:
             self.save_paned_positions_only()
         
         self.root.destroy()
+
+    # Rating methods for keyboard shortcuts
+    def rate_current_browse_image( self, rating ):
+        """Rate the currently displayed browse image"""
+        if not self.current_browse_image:
+            return
+            
+        # Check if current image is in a database
+        if not self.current_database_path:
+            # Create a database in the current directory for rating
+            db_path = os.path.join( self.current_browse_directory, "ratings.db" )
+            if not os.path.exists( db_path ):
+                try:
+                    conn = sqlite3.connect( db_path )
+                    cursor = conn.cursor()
+                    
+                    # Create tables
+                    cursor.execute( """CREATE TABLE images (
+                        id INTEGER PRIMARY KEY,
+                        filename TEXT UNIQUE,
+                        relative_path TEXT,
+                        width INTEGER,
+                        height INTEGER,
+                        rating INTEGER DEFAULT 0
+                    )""" )
+                    
+                    cursor.execute( """CREATE TABLE tags (
+                        id INTEGER PRIMARY KEY,
+                        name TEXT UNIQUE
+                    )""" )
+                    
+                    cursor.execute( """CREATE TABLE image_tags (
+                        image_id INTEGER,
+                        tag_id INTEGER,
+                        FOREIGN KEY (image_id) REFERENCES images (id),
+                        FOREIGN KEY (tag_id) REFERENCES tags (id),
+                        PRIMARY KEY (image_id, tag_id)
+                    )""" )
+                    
+                    conn.commit()
+                    conn.close()
+                    
+                    # Open the new database
+                    self.open_database_file( db_path )
+                    
+                except Exception as e:
+                    print( f"Error creating rating database: {e}" )
+                    return
+        
+        self._rate_image_by_path( self.current_browse_image, rating )
+    
+    def rate_current_database_image( self, rating ):
+        """Rate the currently displayed database image"""
+        if not self.current_database_image or not self.current_database_path:
+            return
+        
+        self._rate_image_by_path( self.current_database_image, rating )
+    
+    def rate_current_fullscreen_image( self, rating ):
+        """Rate the currently displayed fullscreen image"""
+        if not self.fullscreen_images or self.fullscreen_index >= len( self.fullscreen_images ):
+            return
+        
+        current_image = self.fullscreen_images[self.fullscreen_index]
+        self._rate_image_by_path( current_image, rating )
+    
+    def _rate_image_by_path( self, image_path, rating ):
+        """Helper method to rate an image by its file path"""
+        if not self.current_database_path:
+            return
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get relative path
+            relative_path = os.path.relpath( image_path, os.path.dirname( self.current_database_path ) )
+            filename = os.path.basename( image_path )
+            
+            # Check if image exists in database
+            cursor.execute( "SELECT id FROM images WHERE filename = ? OR relative_path = ?", (filename, relative_path) )
+            result = cursor.fetchone()
+            
+            if result:
+                # Update existing image
+                cursor.execute( "UPDATE images SET rating = ? WHERE id = ?", (rating, result[0]) )
+            else:
+                # Add new image to database
+                try:
+                    image = Image.open( image_path )
+                    width, height = image.size
+                    image.close()
+                    
+                    cursor.execute( "INSERT INTO images (filename, relative_path, width, height, rating) VALUES (?, ?, ?, ?, ?)",
+                                  (filename, relative_path, width, height, rating) )
+                except Exception as e:
+                    print( f"Error adding image to database: {e}" )
+                    return
+            
+            conn.commit()
+            
+            # Update UI if this is the selected image in database tab
+            if self.selected_image_files and image_path in self.selected_image_files:
+                self.image_rating_var.set( rating )
+            
+            # Store current selection to preserve it after refresh (for database tab)
+            current_filenames = []
+            if hasattr( self, 'database_image_listbox' ):
+                current_selection_indices = list( self.database_image_listbox.curselection() )
+                for index in current_selection_indices:
+                    current_filenames.append( self.database_image_listbox.get( index ) )
+            
+            # Refresh filtered images with preserved selection (for database tab)
+            if hasattr( self, 'database_image_listbox' ) and current_filenames:
+                self.refresh_filtered_images( preserve_selection=current_filenames )
+            else:
+                self.refresh_filtered_images()
+            
+        except Exception as e:
+            print( f"Error rating image: {e}" )
+        finally:
+            conn.close()
+    
+    def adjust_current_browse_rating( self, delta ):
+        """Adjust the rating of the current browse image by delta"""
+        if not self.current_browse_image or not self.current_database_path:
+            return
+        
+        current_rating = self._get_image_rating( self.current_browse_image )
+        new_rating = max( 0, min( 10, current_rating + delta ) )
+        self.rate_current_browse_image( new_rating )
+    
+    def adjust_current_database_rating( self, delta ):
+        """Adjust the rating of the current database image by delta"""
+        if not self.current_database_image or not self.current_database_path:
+            return
+        
+        current_rating = self._get_image_rating( self.current_database_image )
+        new_rating = max( 0, min( 10, current_rating + delta ) )
+        self.rate_current_database_image( new_rating )
+    
+    def adjust_current_fullscreen_rating( self, delta ):
+        """Adjust the rating of the current fullscreen image by delta"""
+        if not self.fullscreen_images or self.fullscreen_index >= len( self.fullscreen_images ):
+            return
+        
+        current_image = self.fullscreen_images[self.fullscreen_index]
+        current_rating = self._get_image_rating( current_image )
+        new_rating = max( 0, min( 10, current_rating + delta ) )
+        self.rate_current_fullscreen_image( new_rating )
+    
+    def _get_image_rating( self, image_path ):
+        """Get the current rating of an image"""
+        if not self.current_database_path:
+            return 0
+        
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            relative_path = os.path.relpath( image_path, os.path.dirname( self.current_database_path ) )
+            filename = os.path.basename( image_path )
+            
+            cursor.execute( "SELECT rating FROM images WHERE filename = ? OR relative_path = ?", (filename, relative_path) )
+            result = cursor.fetchone()
+            
+            return result[0] if result else 0
+            
+        except Exception as e:
+            print( f"Error getting image rating: {e}" )
+            return 0
+        finally:
+            conn.close()
+    
+    def on_rating_arrow_press( self, event ):
+        """Handle arrow key press for rating adjustment with long press support"""
+        if event.keysym == 'Left':
+            delta = -1
+        elif event.keysym == 'Right':
+            delta = 1
+        else:
+            return
+        
+        # Determine which rating adjustment method to use based on focus
+        widget = event.widget
+        if widget == self.browse_preview_label:
+            self.adjust_current_browse_rating( delta )
+            adjust_method = lambda: self.adjust_current_browse_rating( delta )
+        elif widget == self.database_preview_label:
+            self.adjust_current_database_rating( delta )
+            adjust_method = lambda: self.adjust_current_database_rating( delta )
+        else:
+            return
+        
+        # Start repeat timer for long press (500ms intervals)
+        self._rating_repeat_timer = self.root.after( 500, self._rating_repeat, adjust_method )
+    
+    def on_rating_arrow_release( self, event ):
+        """Handle arrow key release to stop long press rating adjustment"""
+        if self._rating_repeat_timer:
+            self.root.after_cancel( self._rating_repeat_timer )
+            self._rating_repeat_timer = None
+    
+    def _rating_repeat( self, adjust_method ):
+        """Repeat rating adjustment for long press"""
+        adjust_method()
+        # Schedule next repeat
+        self._rating_repeat_timer = self.root.after( 500, self._rating_repeat, adjust_method )
 
 class TagDialog:
     def __init__( self, parent, filepath, database_path ):
@@ -2947,6 +3394,8 @@ class MultiTagDialog:
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to save tags: {str(e)}" )
+
+
 
 def main():
     root = tk.Tk()
