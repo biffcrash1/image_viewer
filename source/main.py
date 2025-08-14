@@ -160,6 +160,18 @@ class ImageViewer:
         ttk.Button( button_frame, text="Open Database", command=self.open_database ).pack( side=tk.LEFT, padx=(0, 5) )
         ttk.Button( button_frame, text="Create Database", command=self.create_database ).pack( side=tk.LEFT, padx=5 )
         
+        # Recent databases dropdown
+        recent_frame = ttk.Frame( self.database_frame )
+        recent_frame.pack( fill=tk.X, padx=10, pady=(0, 5) )
+        
+        ttk.Label( recent_frame, text="Recent Databases:" ).pack( side=tk.LEFT, padx=(0, 5) )
+        self.recent_databases_var = tk.StringVar()
+        self.recent_databases_combo = ttk.Combobox( recent_frame, textvariable=self.recent_databases_var, state="readonly", width=50 )
+        self.recent_databases_combo.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        self.recent_databases_combo.bind( "<<ComboboxSelected>>", self.on_recent_database_selected )
+        
+        ttk.Button( recent_frame, text="Open Selected", command=self.open_selected_recent_database ).pack( side=tk.RIGHT )
+        
         # Create paned window for two columns
         paned = ttk.PanedWindow( self.database_frame, orient=tk.HORIZONTAL )
         paned.pack( fill=tk.BOTH, expand=True )
@@ -939,6 +951,9 @@ class ImageViewer:
             self.current_database = directory
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
+            self.update_recent_databases_dropdown()
+            # Save the database state immediately
+            self.save_paned_positions_only()
             
             messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
             
@@ -1013,6 +1028,9 @@ class ImageViewer:
             self.current_database = directory
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
+            self.update_recent_databases_dropdown()
+            # Save the database state immediately
+            self.save_paned_positions_only()
             
             messagebox.showinfo( "Success", f"Database created successfully at {db_path}" )
             
@@ -1129,7 +1147,11 @@ class ImageViewer:
         
         if not db_path:
             return
-            
+        
+        self.open_database_file( db_path )
+    
+    def open_database_file( self, db_path ):
+        """Open a specific database file"""
         try:
             # Test database connection
             conn = sqlite3.connect( db_path )
@@ -1149,6 +1171,9 @@ class ImageViewer:
             self.current_database = os.path.dirname( db_path )
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
+            self.update_recent_databases_dropdown()
+            # Save the database state immediately
+            self.save_paned_positions_only()
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to open database: {str(e)}" )
@@ -1958,6 +1983,7 @@ class ImageViewer:
             self.save_paned_positions( settings )
             self.save_window_geometry( settings )
             self.save_active_tab( settings )
+            self.save_current_database( settings )
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )
@@ -2059,6 +2085,32 @@ class ImageViewer:
             
         except Exception as e:
             print( f"Error saving active tab: {e}" )
+    
+    def save_current_database( self, settings ):
+        """Save the currently open database and update recent databases list"""
+        try:
+            # Save current database path
+            if self.current_database_path:
+                settings['current_database'] = self.current_database_path
+                
+                # Update recent databases list
+                recent_databases = settings.get( 'recent_databases', [] )
+                
+                # Remove current database if it's already in the list
+                if self.current_database_path in recent_databases:
+                    recent_databases.remove( self.current_database_path )
+                
+                # Add current database to the front of the list
+                recent_databases.insert( 0, self.current_database_path )
+                
+                # Keep only the 5 most recent
+                settings['recent_databases'] = recent_databases[:5]
+            else:
+                # No database currently open
+                settings['current_database'] = None
+                
+        except Exception as e:
+            print( f"Error saving current database: {e}" )
     
     def save_active_tab_only( self ):
         """Save only the active tab state to settings (called when tab changes)"""
@@ -2164,9 +2216,103 @@ class ImageViewer:
             # Default to browse tab on error
             self.notebook.select( 0 )
     
+    def on_recent_database_selected( self, event ):
+        """Handle selection from recent databases dropdown"""
+        # This method is called when user selects from dropdown
+        # The actual opening is handled by the "Open Selected" button
+        pass
+    
+    def open_selected_recent_database( self ):
+        """Open the database selected in the recent databases dropdown"""
+        selected_path = self.recent_databases_var.get()
+        if selected_path and os.path.exists( selected_path ):
+            self.open_database_file( selected_path )
+        elif selected_path:
+            messagebox.showerror( "Error", f"Database file not found: {selected_path}" )
+            # Remove the non-existent database from recent list
+            self.remove_from_recent_databases( selected_path )
+    
+    def remove_from_recent_databases( self, database_path ):
+        """Remove a database from the recent databases list"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            recent_databases = settings.get( 'recent_databases', [] )
+            if database_path in recent_databases:
+                recent_databases.remove( database_path )
+                settings['recent_databases'] = recent_databases
+                
+                with open( self.settings_file, 'w' ) as f:
+                    json.dump( settings, f, indent=2 )
+                
+                # Update the dropdown
+                self.update_recent_databases_dropdown()
+                
+        except Exception as e:
+            print( f"Error removing database from recent list: {e}" )
+    
+    def update_recent_databases_dropdown( self ):
+        """Update the recent databases dropdown with current list"""
+        try:
+            if not hasattr( self, 'recent_databases_combo' ):
+                return  # UI not initialized yet
+                
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            recent_databases = settings.get( 'recent_databases', [] )
+            
+            # Filter out databases that no longer exist
+            existing_databases = [db for db in recent_databases if os.path.exists( db )]
+            
+            # Update the dropdown values
+            self.recent_databases_combo['values'] = existing_databases
+            
+            # Clear selection if current selection no longer exists
+            current_selection = self.recent_databases_var.get()
+            if current_selection and current_selection not in existing_databases:
+                self.recent_databases_var.set( '' )
+                
+        except Exception as e:
+            print( f"Error updating recent databases dropdown: {e}" )
+    
+    def prompt_restore_database( self ):
+        """Prompt user to restore the last open database if it exists"""
+        try:
+            if not os.path.exists( self.settings_file ):
+                return
+                
+            with open( self.settings_file, 'r' ) as f:
+                settings = json.load( f )
+            
+            current_database = settings.get( 'current_database' )
+            if current_database and os.path.exists( current_database ):
+                # Ask user if they want to reopen the database
+                db_name = os.path.basename( current_database )
+                result = messagebox.askyesno( 
+                    "Restore Database", 
+                    f"Would you like to reopen the previously used database?\n\n{db_name}",
+                    icon='question'
+                )
+                
+                if result:
+                    self.open_database_file( current_database )
+                    
+        except Exception as e:
+            print( f"Error prompting for database restore: {e}" )
+    
     def complete_startup( self ):
         """Mark startup as complete to enable state saving"""
         self.startup_complete = True
+        # Update recent databases dropdown after startup
+        self.update_recent_databases_dropdown()
+        # Prompt to restore database after a short delay
+        self.root.after( 500, self.prompt_restore_database )
     
     def set_default_window_geometry( self ):
         """Set default window size and center it on screen"""
@@ -2260,7 +2406,7 @@ class ImageViewer:
 
     
     def save_paned_positions_only( self ):
-        """Save paned positions, window geometry, and tab state to settings (called during resize)"""
+        """Save paned positions, window geometry, tab state, and database to settings (called during resize)"""
         try:
             settings = {}
             if os.path.exists( self.settings_file ):
@@ -2270,6 +2416,7 @@ class ImageViewer:
             self.save_paned_positions( settings )
             self.save_window_geometry( settings )
             self.save_active_tab( settings )
+            self.save_current_database( settings )
             
             with open( self.settings_file, 'w' ) as f:
                 json.dump( settings, f, indent=2 )

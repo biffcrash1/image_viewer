@@ -5,8 +5,12 @@
   "window": {
     "width": 1591,
     "height": 854,
-    "x": 2951,
-    "y": 157
+    "x": 3159,
+    "y": 155
   },
-  "active_tab": "database"
+  "active_tab": "browse",
+  "current_database": "E:/Data/_Nates_Stuff/Photos/2002_Subaru_WRX/subie1.db",
+  "recent_databases": [
+    "E:/Data/_Nates_Stuff/Photos/2002_Subaru_WRX/subie1.db"
+  ]
 }
