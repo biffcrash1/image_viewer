@@ -62,3 +62,4 @@ python main.py
 - BMP (.bmp)
 - TIFF (.tiff)
 - WebP (.webp)
+

@@ -27,6 +27,8 @@ class ImageViewer:
         self.fullscreen_images = []
         self.fullscreen_index = 0
         self.previous_tab = None
+        self.current_browse_image = None
+        self.current_database_image = None
         
         # Supported image formats
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
@@ -78,6 +80,9 @@ class ImageViewer:
         ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
+        
+        # Bind double-click event to preview label
+        self.browse_preview_label.bind( "<Double-Button-1>", self.on_browse_preview_double_click )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -131,6 +136,9 @@ class ImageViewer:
         ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
         self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.database_preview_label.pack( fill=tk.BOTH, expand=True )
+        
+        # Bind double-click event to preview label
+        self.database_preview_label.bind( "<Double-Button-1>", self.on_database_preview_double_click )
         
         # Right column - Tag filters and image list
         right_frame = ttk.Frame( paned )
@@ -265,6 +273,7 @@ class ImageViewer:
             filepath = self.browse_tree.item( item )['values'][0]
             
             if self.is_image_file( filepath ):
+                self.current_browse_image = filepath
                 self.display_image_preview( filepath, self.browse_preview_label )
                 
     def on_browse_tree_double_click( self, event ):
@@ -284,6 +293,11 @@ class ImageViewer:
             filepath = self.browse_tree.item( item )['values'][0]
             if self.is_image_file( filepath ):
                 self.show_tag_dialog( filepath )
+                
+    def on_browse_preview_double_click( self, event ):
+        """Handle double click on browse preview image"""
+        if self.current_browse_image and os.path.exists( self.current_browse_image ):
+            self.enter_fullscreen_mode( self.current_browse_image )
                 
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
@@ -674,6 +688,7 @@ class ImageViewer:
             # Find full path
             filepath = self.find_image_path( filename )
             if filepath:
+                self.current_database_image = filepath
                 self.display_image_preview( filepath, self.database_preview_label )
                 
     def on_database_image_double_click( self, event ):
@@ -699,6 +714,11 @@ class ImageViewer:
             filepath = self.find_image_path( filename )
             if filepath:
                 self.show_tag_dialog( filepath )
+                
+    def on_database_preview_double_click( self, event ):
+        """Handle double click on database preview image"""
+        if self.current_database_image and os.path.exists( self.current_database_image ):
+            self.enter_fullscreen_mode( self.current_database_image )
                 
     def find_image_path( self, filename ):
         """Find the full path of an image file by filename"""
