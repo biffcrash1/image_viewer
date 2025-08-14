@@ -2270,12 +2270,19 @@ class ImageViewer:
             # Filter out databases that no longer exist
             existing_databases = [db for db in recent_databases if os.path.exists( db )]
             
-            # Update the dropdown values
+            # Create display names (just the filename) but keep full paths as values
+            display_values = []
+            for db_path in existing_databases:
+                filename = os.path.basename( db_path )
+                display_values.append( f"{filename} ({os.path.dirname( db_path )})" )
+            
+            # Update the dropdown values with full paths for functionality
             self.recent_databases_combo['values'] = existing_databases
             
-            # Clear selection if current selection no longer exists
-            current_selection = self.recent_databases_var.get()
-            if current_selection and current_selection not in existing_databases:
+            # If we have databases, set the first one as default to show something
+            if existing_databases:
+                self.recent_databases_var.set( existing_databases[0] )
+            else:
                 self.recent_databases_var.set( '' )
                 
         except Exception as e:
