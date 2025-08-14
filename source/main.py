@@ -1040,8 +1040,6 @@ class ImageViewer:
             self.refresh_database_view()
             self.notebook.select( 1 )  # Switch to Database tab
             
-            messagebox.showinfo( "Success", f"Database opened: {os.path.basename(db_path)}" )
-            
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to open database: {str(e)}" )
             
@@ -1091,7 +1089,8 @@ class ImageViewer:
             conn.close()
             
             self.refresh_database_view()
-            messagebox.showinfo( "Success", "Database rescanned successfully" )
+            
+            messagebox.showinfo( "Success", "Database rescan completed successfully" )
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to rescan database: {str(e)}" )
@@ -1234,6 +1233,43 @@ class ImageViewer:
             self.database_image_listbox.delete( 0, tk.END )
             for relative_path, filename in images:
                 self.database_image_listbox.insert( tk.END, filename )
+                
+            # Check if currently previewed image is still in the filtered list
+            current_filename = None
+            if self.current_database_image:
+                current_filename = os.path.basename( self.current_database_image )
+                
+            # Check if current image is in the new filtered list
+            filtered_filenames = [filename for relative_path, filename in images]
+            
+            if current_filename and current_filename in filtered_filenames:
+                # Current image is still in filtered list - select it
+                try:
+                    current_index = filtered_filenames.index( current_filename )
+                    self.database_image_listbox.selection_set( current_index )
+                    self.database_image_listbox.see( current_index )
+                except ValueError:
+                    pass  # Shouldn't happen, but just in case
+            elif filtered_filenames:
+                # Current image is not in filtered list or no current image - select first image
+                self.database_image_listbox.selection_set( 0 )
+                self.database_image_listbox.see( 0 )
+                
+                # Update preview to show first image
+                first_filename = filtered_filenames[0]
+                first_filepath = self.find_image_path( first_filename )
+                if first_filepath:
+                    self.current_database_image = first_filepath
+                    self.display_image_preview( first_filepath, self.database_preview_label )
+                    self.selected_image_files = [first_filepath]
+                    self.load_image_tags_for_editing()
+            else:
+                # No images in filtered list - clear preview
+                self.current_database_image = None
+                self.database_preview_label.configure( image="", text="No images match filters" )
+                self.database_preview_label.image = None
+                self.selected_image_files = []
+                self.clear_image_tag_interface()
                 
             conn.close()
             
@@ -1559,9 +1595,7 @@ class ImageViewer:
                 # Reload the tag editing interface to reflect changes
                 self.load_image_tags_for_editing()
                 
-                messagebox.showinfo( "Success", f"Changes applied to {len(self.selected_image_files)} image(s)" )
-            else:
-                messagebox.showinfo( "Info", "No changes to apply" )
+
             
             conn.close()
             
