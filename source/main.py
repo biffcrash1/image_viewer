@@ -9,6 +9,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import sqlite3
 import os
 from PIL import Image, ImageTk, ExifTags
+from PIL.ExifTags import TAGS
 import threading
 import time
 from pathlib import Path
@@ -709,13 +710,8 @@ class TreeviewImageList:
                                 if not hasattr( self, '_processing_priority' ) or not self._processing_priority:
                                     self._processing_priority = True
                                     self.parent.after( 1, self._process_priority_thumbnail_load )
-                                print( f"Re-queuing missing visible thumbnail for item {item_id} (path: {os.path.basename(filepath)})" )
-            
-            # Always print status for debugging
-            print( f"Visible thumbnail status: {loaded_count} loaded, {pending_count} pending, {missing_count} missing, {total_visible} total" )
             
             if missing_count > 0:
-                print( f"Found {missing_count} missing visible thumbnails, re-queued them" )
                 # Schedule another verification in case more are missed
                 self.parent.after( 200, self.verify_visible_thumbnails_loaded )
             elif pending_count > 0:
@@ -1065,17 +1061,36 @@ class ImageViewer:
         vertical_paned = ttk.PanedWindow( right_frame, orient=tk.VERTICAL )
         vertical_paned.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
         
-        # Top section - Split into Tag Filters and Image Tags
+        # Top section - Split into Tag Filters, Image Tags, and File Tags
         top_section = ttk.Frame( vertical_paned )
         vertical_paned.add( top_section, weight=1 )
         
-        # Left side - Tag filter section
+        # Left side - Tag filter section (1/3 width)
         tag_frame = ttk.LabelFrame( top_section, text="Tag Filters" )
         tag_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 2) )
         
-        # Right side - Image Tags section
+        # Middle - Image Tags section (1/3 width)
         image_tags_frame = ttk.LabelFrame( top_section, text="Image Tags" )
-        image_tags_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0) )
+        image_tags_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 2) )
+        
+        # Right side - File Tags section (1/3 width)
+        file_tags_frame = ttk.LabelFrame( top_section, text="File Tags" )
+        file_tags_frame.pack( side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(2, 0) )
+        
+        # File tags display with scrollable text
+        file_tags_text_frame = ttk.Frame( file_tags_frame )
+        file_tags_text_frame.pack( fill=tk.BOTH, expand=True, padx=5, pady=5 )
+        
+        # Create text widget with scrollbar
+        self.file_tags_text = tk.Text( file_tags_text_frame, wrap=tk.WORD, 
+                                      state=tk.DISABLED, height=10, 
+                                      font=('TkDefaultFont', 9) )
+        file_tags_scrollbar = ttk.Scrollbar( file_tags_text_frame, orient=tk.VERTICAL, 
+                                           command=self.file_tags_text.yview )
+        self.file_tags_text.configure( yscrollcommand=file_tags_scrollbar.set )
+        
+        self.file_tags_text.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        file_tags_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
         
         # Initialize tag editing variables
         self.image_tag_checkboxes = {}  # Dictionary to store tag checkbox variables
@@ -1729,6 +1744,131 @@ class ImageViewer:
         
         return image
 
+    def extract_image_file_tags( self, filepath ):
+        """Extract keywords/tags from image file metadata (EXIF, IPTC, XMP)"""
+        tags = []
+        
+        try:
+            with Image.open( filepath ) as img:
+                # Try to get EXIF data
+                if hasattr( img, 'getexif' ):
+                    exif = img.getexif()
+                    
+                    # Look for keywords in EXIF data
+                    # EXIF tag 0x9286 is UserComment, sometimes contains keywords
+                    # EXIF tag 0x010E is ImageDescription, sometimes contains keywords
+                    # EXIF tag 0x9C9C is XPKeywords (Windows XP keywords)
+                    # EXIF tag 0x9C9D is XPSubject
+                    # EXIF tag 0x9C9E is XPComment
+                    
+                    for tag_id, value in exif.items():
+                        tag_name = TAGS.get( tag_id, tag_id )
+                        
+                        # Check for keywords in various EXIF fields
+                        if tag_name in ['ImageDescription', 'UserComment', 'XPKeywords', 'XPSubject', 'XPComment']:
+                            if isinstance( value, bytes ):
+                                try:
+                                    # Try to decode bytes to string
+                                    value = value.decode( 'utf-8', errors='ignore' ).strip()
+                                except:
+                                    continue
+                            elif isinstance( value, str ):
+                                value = value.strip()
+                            else:
+                                continue
+                            
+                            if value:
+                                # Split on common separators for keywords
+                                keywords = []
+                                for separator in [';', ',', '|', '\n', '\r']:
+                                    if separator in value:
+                                        keywords = [k.strip() for k in value.split( separator )]
+                                        break
+                                else:
+                                    # No separator found, treat as single keyword if reasonable length
+                                    if len( value ) < 100:  # Reasonable keyword length
+                                        keywords = [value]
+                                
+                                tags.extend( [k for k in keywords if k and len( k ) > 0] )
+                
+                # Try to get additional metadata using info dictionary
+                if hasattr( img, 'info' ) and img.info:
+                    # Look for IPTC keywords
+                    if 'keywords' in img.info:
+                        keywords = img.info['keywords']
+                        if isinstance( keywords, (list, tuple) ):
+                            tags.extend( [str( k ).strip() for k in keywords if k] )
+                        elif isinstance( keywords, str ):
+                            tags.extend( [k.strip() for k in keywords.split( ';' ) if k.strip()] )
+                    
+                    # Look for other metadata fields that might contain keywords
+                    for key in ['subject', 'description', 'comment']:
+                        if key in img.info:
+                            value = img.info[key]
+                            if isinstance( value, str ) and value.strip():
+                                # Split on common separators
+                                keywords = [k.strip() for k in value.split( ';' ) if k.strip()]
+                                tags.extend( keywords )
+        
+        except Exception as e:
+            print( f"Error extracting tags from {filepath}: {e}" )
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_tags = []
+        for tag in tags:
+            tag_lower = tag.lower()
+            if tag_lower not in seen:
+                seen.add( tag_lower )
+                unique_tags.append( tag )
+        
+        return unique_tags
+
+    def update_file_tags_display( self, filepath=None ):
+        """Update the file tags display with tags from the selected image file"""
+        # Check if the widget exists (might be called before UI is fully initialized)
+        if not hasattr( self, 'file_tags_text' ):
+            print( "DEBUG: file_tags_text widget not found!" )
+            return
+            
+        print( f"DEBUG: update_file_tags_display called with: {filepath}" )
+            
+        # Clear the text widget
+        self.file_tags_text.configure( state=tk.NORMAL )
+        self.file_tags_text.delete( 1.0, tk.END )
+        
+        if filepath and os.path.exists( filepath ):
+            print( f"DEBUG: File exists, extracting tags from: {filepath}" )
+            try:
+                # Extract tags from the image file
+                file_tags = self.extract_image_file_tags( filepath )
+                print( f"DEBUG: Extracted tags: {file_tags}" )
+                
+                if file_tags:
+                    # Display the tags
+                    tags_text = "\n".join( f"• {tag}" for tag in file_tags )
+                    self.file_tags_text.insert( tk.END, tags_text )
+                    print( f"DEBUG: Inserted tags into widget: {tags_text}" )
+                else:
+                    self.file_tags_text.insert( tk.END, "No tags found in image file" )
+                    print( "DEBUG: No tags found" )
+                    
+            except Exception as e:
+                error_msg = f"Error reading file tags:\n{str(e)}"
+                self.file_tags_text.insert( tk.END, error_msg )
+                print( f"DEBUG: Exception occurred: {e}" )
+        else:
+            if not filepath:
+                self.file_tags_text.insert( tk.END, "No image selected" )
+                print( "DEBUG: No filepath provided" )
+            else:
+                self.file_tags_text.insert( tk.END, "Image file not found" )
+                print( f"DEBUG: File not found: {filepath}" )
+        
+        # Make text widget read-only again
+        self.file_tags_text.configure( state=tk.DISABLED )
+        print( "DEBUG: Widget updated and set to disabled" )
+
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
         try:
@@ -2084,6 +2224,8 @@ class ImageViewer:
                         self.display_image_preview( filepath, self.database_preview_label )
                         self.selected_image_files = [filepath]
                         self.load_image_tags_for_editing()
+                        # Update file tags display for single selection
+                        self.update_file_tags_display( filepath )
                 else:
                     # Multiple selection - show count
                     filepaths = []
@@ -2100,12 +2242,16 @@ class ImageViewer:
                     self.database_preview_label.configure( image="", text=f"{len(selected_indices)} images selected" )
                     self.database_preview_label.image = None
                     self.load_image_tags_for_editing()
+                    # Clear file tags display for multiple selection
+                    self.update_file_tags_display( None )
         else:
             # No selection
             self.current_database_image = None
             self.selected_image_files = []
             self.database_preview_label.configure( image="", text="No selection" )
             self.database_preview_label.image = None
+            # Clear file tags display for no selection
+            self.update_file_tags_display( None )
     
     def on_virtual_double_click( self, index, event ):
         """Handle double click in virtual image list"""
@@ -3016,6 +3162,8 @@ class ImageViewer:
                     self.display_image_preview( filepath, self.database_preview_label )
                     self.selected_image_files = [filepath]
                     self.load_image_tags_for_editing()
+                    # Update file tags display for single selection (after loading tags)
+                                self.update_file_tags_display( filepath )
             else:
                 # Multiple selection - load tags for bulk editing
                 filenames = [self.database_image_listbox.get( i ) for i in selection]
@@ -3025,10 +3173,13 @@ class ImageViewer:
                 self.database_preview_label.configure( image="", text=f"{len(selection)} images selected" )
                 self.database_preview_label.image = None
                 self.load_image_tags_for_editing()
+                # Clear file tags display for multiple selection
+                self.update_file_tags_display( None )
         else:
-            # No selection - clear tag editing interface
+            # No selection - clear tag editing interface and file tags display
             self.selected_image_files = []
             self.clear_image_tag_interface()
+            self.update_file_tags_display( None )
             
     def load_image_tags_for_editing( self ):
         """Load tags for the selected images into the editing interface with lazy loading"""
@@ -3157,6 +3308,8 @@ class ImageViewer:
         
         # Disable apply button
         self.image_apply_button.configure( state='disabled' )
+        
+        # Note: File tags display is managed separately and not cleared here
         
     def on_image_partial_checkbox_clicked( self, tag_id ):
         """Handle clicking on a greyed out (partial) checkbox in the image tags interface"""
