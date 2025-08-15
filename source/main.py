@@ -36,6 +36,18 @@ class TreeviewImageList:
         self.selection_callbacks = []
         self.last_clicked_index = None
         
+        # Thumbnail support
+        self._thumbnail_cache = {}
+        self.thumbnail_load_queue = deque()
+        self.thumbnail_loading = False
+        self.max_cache_size = 500
+        self.thumbnail_size = (64, 64)
+        
+        # Debouncing for thumbnail loading
+        self.thumbnail_load_delay = 200  # ms delay before loading
+        self.pending_thumbnail_loads = {}  # {item_id: after_id}
+        self.last_scroll_time = 0
+        
         # Create UI components
         self.setup_ui()
         
@@ -65,6 +77,10 @@ class TreeviewImageList:
         self.treeview.bind( "<Button-1>", self.on_click )
         self.treeview.bind( "<Double-Button-1>", self.on_double_click )
         
+        # Bind scroll events for thumbnail loading debouncing
+        self.treeview.bind( "<MouseWheel>", self.on_scroll )
+        scrollbar.bind( "<ButtonRelease-1>", self.on_scroll_release )
+        
     def set_items( self, items ):
         """Set the list of items to display"""
         self.items = items
@@ -91,14 +107,22 @@ class TreeviewImageList:
         # Add filtered items
         for i, item_data in enumerate( self.filtered_items ):
             filename = item_data.get( 'filename', 'Unknown' )
+            filepath = item_data.get( 'filepath' )
+            show_thumbnails = item_data.get( 'show_thumbnails', False )
             
-            # For now, show just the filename - thumbnails can be added later
-            display_text = filename
-            if item_data.get( 'show_thumbnails', False ):
-                display_text = f"📷 {filename}"  # Simple thumbnail indicator
-                
-            # Insert item with index as the item ID for easy lookup
-            self.treeview.insert( '', 'end', iid=str(i), text=display_text )
+            # Insert item with filename
+            item_id = str( i )
+            self.treeview.insert( '', 'end', iid=item_id, text=filename )
+            
+            # Queue thumbnail loading if enabled and filepath exists
+            if show_thumbnails and filepath and os.path.exists( filepath ):
+                # Check if thumbnail is already cached
+                if filepath in self._thumbnail_cache:
+                    # Use cached thumbnail immediately
+                    self.treeview.item( item_id, image=self._thumbnail_cache[filepath] )
+                else:
+                    # Queue for lazy loading
+                    self.queue_thumbnail_load( filepath, item_id )
             
     def on_selection_changed( self, event ):
         """Handle treeview selection changes"""
@@ -163,9 +187,201 @@ class TreeviewImageList:
     @property
     def thumbnail_cache( self ):
         """Thumbnail cache compatibility"""
-        if not hasattr( self, '_thumbnail_cache' ):
-            self._thumbnail_cache = {}
         return self._thumbnail_cache
+        
+    def load_thumbnail( self, filepath ):
+        """Load and cache a thumbnail for the given filepath"""
+        if filepath in self._thumbnail_cache:
+            return self._thumbnail_cache[filepath]
+            
+        try:
+            # Load and resize image
+            with Image.open( filepath ) as img:
+                # Convert to RGB if necessary
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    img = img.convert( 'RGB' )
+                
+                # Create thumbnail
+                img.thumbnail( self.thumbnail_size, Image.Resampling.LANCZOS )
+                
+                # Convert to PhotoImage for Tkinter
+                photo = ImageTk.PhotoImage( img )
+                
+                # Cache the thumbnail
+                self._thumbnail_cache[filepath] = photo
+                
+                # Clean cache if it gets too large
+                if len( self._thumbnail_cache ) > self.max_cache_size:
+                    self.cleanup_thumbnail_cache()
+                    
+                return photo
+                
+        except Exception as e:
+            print( f"Error loading thumbnail for {filepath}: {e}" )
+            return None
+            
+    def cleanup_thumbnail_cache( self ):
+        """Remove old thumbnails from cache"""
+        # Remove 25% of cached items
+        items_to_remove = len( self._thumbnail_cache ) // 4
+        cache_keys = list( self._thumbnail_cache.keys() )
+        
+        for key in cache_keys[:items_to_remove]:
+            del self._thumbnail_cache[key]
+            
+    def queue_thumbnail_load( self, filepath, item_id ):
+        """Queue a thumbnail for lazy loading with debouncing"""
+        if not filepath or not os.path.exists( filepath ):
+            return
+            
+        # Cancel any pending load for this item
+        if item_id in self.pending_thumbnail_loads:
+            self.parent.after_cancel( self.pending_thumbnail_loads[item_id] )
+            
+        # Schedule thumbnail load after delay
+        after_id = self.parent.after( self.thumbnail_load_delay, 
+                                     lambda: self._delayed_thumbnail_load( filepath, item_id ) )
+        self.pending_thumbnail_loads[item_id] = after_id
+        
+    def _delayed_thumbnail_load( self, filepath, item_id ):
+        """Actually load the thumbnail after the delay"""
+        # Remove from pending loads
+        if item_id in self.pending_thumbnail_loads:
+            del self.pending_thumbnail_loads[item_id]
+            
+        # Only load if item still exists and is visible
+        if self.treeview.exists( item_id ):
+            self.thumbnail_load_queue.append( (filepath, item_id) )
+            if not self.thumbnail_loading:
+                self.process_thumbnail_queue()
+                
+    def process_thumbnail_queue( self ):
+        """Process thumbnail loading queue in background"""
+        if not self.thumbnail_load_queue:
+            self.thumbnail_loading = False
+            return
+            
+        self.thumbnail_loading = True
+        
+        # Get next item from queue
+        filepath, item_id = self.thumbnail_load_queue.popleft()
+        
+        def load_thumbnail_async():
+            """Load thumbnail in background thread"""
+            try:
+                photo = self.load_thumbnail( filepath )
+                if photo:
+                    # Update treeview item with thumbnail on main thread
+                    self.parent.after( 0, lambda: self.update_item_thumbnail( item_id, photo ) )
+            except Exception as e:
+                print( f"Error in thumbnail thread: {e}" )
+            finally:
+                # Continue processing queue after a short delay
+                self.parent.after( 10, self.process_thumbnail_queue )
+                
+        # Load thumbnail in background thread
+        threading.Thread( target=load_thumbnail_async, daemon=True ).start()
+        
+    def update_item_thumbnail( self, item_id, photo ):
+        """Update treeview item with loaded thumbnail"""
+        try:
+            if self.treeview.exists( item_id ):
+                # Get current text and add thumbnail
+                current_text = self.treeview.item( item_id, 'text' )
+                # Remove existing 📷 indicator if present
+                if current_text.startswith( '📷 ' ):
+                    current_text = current_text[2:]
+                    
+                # Set the image for the treeview item
+                self.treeview.item( item_id, image=photo )
+        except Exception as e:
+            print( f"Error updating thumbnail for {item_id}: {e}" )
+            
+    def set_thumbnails_enabled( self, enabled ):
+        """Enable or disable thumbnails for all items"""
+        for i, item_data in enumerate( self.filtered_items ):
+            item_data['show_thumbnails'] = enabled
+            
+        # Refresh the treeview to apply changes
+        self.refresh_treeview()
+        
+    def clear_thumbnails( self ):
+        """Clear all thumbnails from display"""
+        for item_id in self.treeview.get_children():
+            self.treeview.item( item_id, image='' )
+            
+    def load_visible_thumbnails( self ):
+        """Load thumbnails for currently visible items only"""
+        try:
+            # Get the visible region of the treeview
+            visible_items = self.treeview.get_children()
+            
+            # Queue thumbnails for visible items
+            for item_id in visible_items:
+                if item_id.isdigit():
+                    index = int( item_id )
+                    if index < len( self.filtered_items ):
+                        item_data = self.filtered_items[index]
+                        filepath = item_data.get( 'filepath' )
+                        show_thumbnails = item_data.get( 'show_thumbnails', False )
+                        
+                        if show_thumbnails and filepath and os.path.exists( filepath ):
+                            if filepath not in self._thumbnail_cache:
+                                self.queue_thumbnail_load( filepath, item_id )
+                                
+        except Exception as e:
+            print( f"Error loading visible thumbnails: {e}" )
+            
+    def on_scroll( self, event ):
+        """Handle scroll events to track scrolling activity"""
+        import time
+        self.last_scroll_time = time.time()
+        
+        # Cancel all pending thumbnail loads during scrolling
+        self.cancel_pending_thumbnail_loads()
+        
+        # Schedule thumbnail loading check after scroll stops
+        self.parent.after( self.thumbnail_load_delay + 50, self.check_scroll_stopped )
+        
+    def on_scroll_release( self, event ):
+        """Handle scrollbar release"""
+        self.on_scroll( event )
+        
+    def cancel_pending_thumbnail_loads( self ):
+        """Cancel all pending thumbnail loads"""
+        for after_id in self.pending_thumbnail_loads.values():
+            self.parent.after_cancel( after_id )
+        self.pending_thumbnail_loads.clear()
+        
+    def check_scroll_stopped( self ):
+        """Check if scrolling has stopped and load visible thumbnails"""
+        import time
+        current_time = time.time()
+        
+        # If no recent scroll activity, load visible thumbnails
+        if current_time - self.last_scroll_time >= (self.thumbnail_load_delay / 1000.0):
+            self.load_visible_thumbnails_debounced()
+            
+    def load_visible_thumbnails_debounced( self ):
+        """Load thumbnails for visible items with debouncing"""
+        try:
+            visible_items = self.treeview.get_children()
+            
+            for item_id in visible_items:
+                if item_id.isdigit():
+                    index = int( item_id )
+                    if index < len( self.filtered_items ):
+                        item_data = self.filtered_items[index]
+                        filepath = item_data.get( 'filepath' )
+                        show_thumbnails = item_data.get( 'show_thumbnails', False )
+                        
+                        if show_thumbnails and filepath and os.path.exists( filepath ):
+                            if filepath not in self._thumbnail_cache:
+                                # Use debounced loading
+                                self.queue_thumbnail_load( filepath, item_id )
+                                
+        except Exception as e:
+            print( f"Error loading visible thumbnails (debounced): {e}" )
 
 class VirtualScrolledImageList:
     """Virtual scrolling implementation for large image lists"""
@@ -723,6 +939,9 @@ class ImageViewer:
         # Bind double-click, mouse wheel, and resize events to preview label
         self.browse_preview_label.bind( "<Double-Button-1>", self.on_browse_preview_double_click )
         self.browse_preview_label.bind( "<MouseWheel>", self.on_browse_preview_scroll )
+        # Also bind alternative mouse wheel events for better cross-platform support
+        self.browse_preview_label.bind( "<Button-4>", lambda e: self.on_browse_preview_scroll_up( e ) )
+        self.browse_preview_label.bind( "<Button-5>", lambda e: self.on_browse_preview_scroll_down( e ) )
         self.browse_preview_label.bind( "<Configure>", self.on_browse_preview_resize )
         self.browse_preview_label.bind( "<Button-1>", lambda e: self.browse_preview_label.focus_set() )
         
@@ -733,6 +952,10 @@ class ImageViewer:
         
         # Also bind mouse wheel to the left frame to catch events
         left_frame.bind( "<MouseWheel>", self.on_browse_preview_scroll )
+        # Also bind to Button-4 and Button-5 for the frame
+        left_frame.bind( "<Button-4>", lambda e: self.on_browse_preview_scroll_up( e ) )
+        left_frame.bind( "<Button-5>", lambda e: self.on_browse_preview_scroll_down( e ) )
+
         
         # Add keyboard rating shortcuts for browse preview
         self.browse_preview_label.bind( "<Key-1>", lambda e: self.rate_current_browse_image( 1 ) )
@@ -830,6 +1053,9 @@ class ImageViewer:
         # Bind double-click, mouse wheel, and resize events to preview label
         self.database_preview_label.bind( "<Double-Button-1>", self.on_database_preview_double_click )
         self.database_preview_label.bind( "<MouseWheel>", self.on_database_preview_scroll )
+        # Also bind alternative mouse wheel events for better cross-platform support
+        self.database_preview_label.bind( "<Button-4>", lambda e: self.on_database_preview_scroll_up( e ) )
+        self.database_preview_label.bind( "<Button-5>", lambda e: self.on_database_preview_scroll_down( e ) )
         self.database_preview_label.bind( "<Configure>", self.on_database_preview_resize )
         self.database_preview_label.bind( "<Button-1>", lambda e: self.database_preview_label.focus_set() )
         
@@ -840,8 +1066,12 @@ class ImageViewer:
         
         # Also bind mouse wheel to the left frame to catch events
         left_frame.bind( "<MouseWheel>", self.on_database_preview_scroll )
+        # Also bind to Button-4 and Button-5 for the frame
+        left_frame.bind( "<Button-4>", lambda e: self.on_database_preview_scroll_up( e ) )
+        left_frame.bind( "<Button-5>", lambda e: self.on_database_preview_scroll_down( e ) )
+
         
-        # Add keyboard rating shortcuts for database preview
+        # Add keyboard rating shortcuts for database preview (local to preview label)
         self.database_preview_label.bind( "<Key-1>", lambda e: self.rate_current_database_image( 1 ) )
         self.database_preview_label.bind( "<Key-2>", lambda e: self.rate_current_database_image( 2 ) )
         self.database_preview_label.bind( "<Key-3>", lambda e: self.rate_current_database_image( 3 ) )
@@ -852,6 +1082,25 @@ class ImageViewer:
         self.database_preview_label.bind( "<Key-8>", lambda e: self.rate_current_database_image( 8 ) )
         self.database_preview_label.bind( "<Key-9>", lambda e: self.rate_current_database_image( 9 ) )
         self.database_preview_label.bind( "<Key-0>", lambda e: self.rate_current_database_image( 10 ) )
+        
+        # Add global keyboard rating shortcuts that work from anywhere in the database tab
+        def handle_global_rating( event, rating ):
+            # Only handle if we're in the database tab and have a current selection
+            if (self.notebook.index( self.notebook.select() ) == 1 and  # Database tab is selected
+                hasattr( self, 'selected_image_files' ) and self.selected_image_files):
+                self.rate_current_database_image( rating )
+                return "break"  # Prevent further event propagation
+                
+        self.root.bind_all( "<Key-1>", lambda e: handle_global_rating( e, 1 ) )
+        self.root.bind_all( "<Key-2>", lambda e: handle_global_rating( e, 2 ) )
+        self.root.bind_all( "<Key-3>", lambda e: handle_global_rating( e, 3 ) )
+        self.root.bind_all( "<Key-4>", lambda e: handle_global_rating( e, 4 ) )
+        self.root.bind_all( "<Key-5>", lambda e: handle_global_rating( e, 5 ) )
+        self.root.bind_all( "<Key-6>", lambda e: handle_global_rating( e, 6 ) )
+        self.root.bind_all( "<Key-7>", lambda e: handle_global_rating( e, 7 ) )
+        self.root.bind_all( "<Key-8>", lambda e: handle_global_rating( e, 8 ) )
+        self.root.bind_all( "<Key-9>", lambda e: handle_global_rating( e, 9 ) )
+        self.root.bind_all( "<Key-0>", lambda e: handle_global_rating( e, 10 ) )
         self.database_preview_label.bind( "<Key-Left>", lambda e: self.adjust_current_database_rating( -1 ) )
         self.database_preview_label.bind( "<Key-Right>", lambda e: self.adjust_current_database_rating( 1 ) )
         self.database_preview_label.bind( "<KeyPress-Left>", self.on_rating_arrow_press )
@@ -1388,6 +1637,20 @@ class ImageViewer:
                 self.current_browse_image = self.browse_folder_images[self.browse_image_index]
                 self.display_image_preview( self.current_browse_image, self.browse_preview_label )
                 
+    def on_browse_preview_scroll_up( self, event ):
+        """Handle scroll up (Button-4) for browse preview"""
+        if self.browse_folder_images and self.browse_image_index > 0:
+            self.browse_image_index -= 1
+            self.current_browse_image = self.browse_folder_images[self.browse_image_index]
+            self.display_image_preview( self.current_browse_image, self.browse_preview_label )
+            
+    def on_browse_preview_scroll_down( self, event ):
+        """Handle scroll down (Button-5) for browse preview"""
+        if self.browse_folder_images and self.browse_image_index < len( self.browse_folder_images ) - 1:
+            self.browse_image_index += 1
+            self.current_browse_image = self.browse_folder_images[self.browse_image_index]
+            self.display_image_preview( self.current_browse_image, self.browse_preview_label )
+                
     def on_browse_preview_resize( self, event ):
         """Handle resize events for browse preview label"""
         # Only process resize events for the label itself, not child widgets
@@ -1441,6 +1704,37 @@ class ImageViewer:
         
         # Trigger the selection event to update preview and tags
         self.on_database_image_select( None )
+        
+    def on_database_preview_scroll_up( self, event ):
+        """Handle scroll up (Button-4) for database preview"""
+        if not self.current_database_path:
+            return
+            
+        current_selection = self.database_image_listbox.curselection()
+        if current_selection:
+            current_index = current_selection[0]
+            if current_index > 0:
+                new_index = current_index - 1
+                self.database_image_listbox.selection_clear( 0, tk.END )
+                self.database_image_listbox.selection_set( new_index )
+                self.database_image_listbox.see( new_index )
+                self.on_database_image_select( None )
+                
+    def on_database_preview_scroll_down( self, event ):
+        """Handle scroll down (Button-5) for database preview"""
+        if not self.current_database_path:
+            return
+            
+        current_selection = self.database_image_listbox.curselection()
+        total_items = self.database_image_listbox.size()
+        if current_selection and total_items > 0:
+            current_index = current_selection[0]
+            if current_index < total_items - 1:
+                new_index = current_index + 1
+                self.database_image_listbox.selection_clear( 0, tk.END )
+                self.database_image_listbox.selection_set( new_index )
+                self.database_image_listbox.see( new_index )
+                self.on_database_image_select( None )
                 
     def apply_exif_orientation( self, image ):
         """Apply EXIF orientation to rotate image correctly"""
@@ -2689,11 +2983,22 @@ class ImageViewer:
                             restored_indices.append( index )
                         except ValueError:
                             pass
-                
                 if restored_indices:
                     # Restore selection in virtual list
                     self.virtual_image_list.selected_indices = set( restored_indices )
                     self.virtual_image_list.update_selection_display()
+                    
+                    # For TreeviewImageList, also update the actual treeview selection
+                    if hasattr( self.virtual_image_list, 'treeview' ):
+                        # Clear current treeview selection
+                        self.virtual_image_list.treeview.selection_remove(
+                            self.virtual_image_list.treeview.selection()
+                        )
+                        # Set new treeview selection
+                        for index in restored_indices:
+                            if 0 <= index < len( self.virtual_image_list.filtered_items ):
+                                item_id = str( index )
+                                self.virtual_image_list.treeview.selection_add( item_id )
                     # Trigger selection callback
                     self.on_virtual_selection_changed( restored_indices )
                 else:
@@ -2701,8 +3006,15 @@ class ImageViewer:
                     if filtered_filenames:
                         self.virtual_image_list.selected_indices = {0}
                         self.virtual_image_list.update_selection_display()
+                        
+                        # For TreeviewImageList, also update the actual treeview selection
+                        if hasattr( self.virtual_image_list, 'treeview' ):
+                            self.virtual_image_list.treeview.selection_remove(
+                                self.virtual_image_list.treeview.selection()
+                            )
+                            self.virtual_image_list.treeview.selection_add( "0" )
+                        
                         self.on_virtual_selection_changed( [0] )
-                
             elif filtered_filenames and not preserve_selection:
                 # No preserved selection - use smart preview logic
                 current_filename = None
@@ -3908,12 +4220,20 @@ class ImageViewer:
         # Update thumbnail setting for all items in virtual list
         if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
             show_thumbs = self.show_thumbnails.get()
-            for item in self.virtual_image_list.items:
-                item['show_thumbnails'] = show_thumbs
+            
+            # Use the TreeviewImageList method to enable/disable thumbnails
+            if hasattr( self.virtual_image_list, 'set_thumbnails_enabled' ):
+                self.virtual_image_list.set_thumbnails_enabled( show_thumbs )
+            else:
+                # Fallback for VirtualScrolledImageList compatibility
+                for item in self.virtual_image_list.items:
+                    item['show_thumbnails'] = show_thumbs
             
             # Clear thumbnail cache if disabling thumbnails
             if not show_thumbs:
                 self.virtual_image_list.thumbnail_cache.clear()
+                if hasattr( self.virtual_image_list, 'clear_thumbnails' ):
+                    self.virtual_image_list.clear_thumbnails()
         
         # Refresh the filtered images list to show/hide thumbnails
         if self.current_database_path:
@@ -4217,27 +4537,47 @@ class ImageViewer:
                 if start == 0 and end == tk.END:
                     self.parent.virtual_image_list.selected_indices.clear()
                     self.parent.virtual_image_list.update_selection_display()
+                    
+                    # For TreeviewImageList, also clear the actual treeview selection
+                    if hasattr( self.parent.virtual_image_list, 'treeview' ):
+                        self.parent.virtual_image_list.treeview.selection_remove(
+                            self.parent.virtual_image_list.treeview.selection()
+                        )
         
         def selection_set( self, index ):
             """Set selection like listbox.selection_set()"""
             if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
                 self.parent.virtual_image_list.selected_indices.add( index )
                 self.parent.virtual_image_list.update_selection_display()
+                
+                # For TreeviewImageList, also update the actual treeview selection
+                if hasattr( self.parent.virtual_image_list, 'treeview' ):
+                    if 0 <= index < len( self.parent.virtual_image_list.filtered_items ):
+                        item_id = str( index )
+                        self.parent.virtual_image_list.treeview.selection_set( item_id )
         
         def see( self, index ):
             """Scroll to make item visible like listbox.see()"""
             if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
                 if 0 <= index < len( self.parent.virtual_image_list.filtered_items ):
-                    # Calculate scroll position to make item visible
-                    item_y = index * self.parent.virtual_image_list.item_height
-                    canvas = self.parent.virtual_image_list.canvas
-                    canvas_height = canvas.winfo_height()
-                    
-                    # Scroll to center the item
-                    total_height = len( self.parent.virtual_image_list.filtered_items ) * self.parent.virtual_image_list.item_height
-                    if total_height > 0:
-                        scroll_pos = max( 0, min( 1.0, item_y / total_height ) )
-                        canvas.yview_moveto( scroll_pos )
+                    # For TreeviewImageList, use the treeview's see method
+                    if hasattr( self.parent.virtual_image_list, 'treeview' ):
+                        # Get the item ID for this index
+                        children = self.parent.virtual_image_list.treeview.get_children()
+                        if index < len( children ):
+                            item_id = children[index]
+                            self.parent.virtual_image_list.treeview.see( item_id )
+                    # For VirtualScrolledImageList, use canvas scrolling
+                    elif hasattr( self.parent.virtual_image_list, 'canvas' ):
+                        item_y = index * self.parent.virtual_image_list.item_height
+                        canvas = self.parent.virtual_image_list.canvas
+                        canvas_height = canvas.winfo_height()
+                        
+                        # Scroll to center the item
+                        total_height = len( self.parent.virtual_image_list.filtered_items ) * self.parent.virtual_image_list.item_height
+                        if total_height > 0:
+                            scroll_pos = max( 0, min( 1.0, item_y / total_height ) )
+                            canvas.yview_moveto( scroll_pos )
         
         def bind( self, event, callback ):
             """Bind events - for compatibility, but events are handled in the new system"""
@@ -4566,18 +4906,18 @@ class ImageViewer:
             if self.selected_image_files and image_path in self.selected_image_files:
                 self.image_rating_var.set( rating )
             
-            # Store current selection to preserve it after refresh (for database tab)
-            current_filenames = []
-            if hasattr( self, 'database_image_listbox' ):
-                current_selection_indices = list( self.database_image_listbox.curselection() )
-                for index in current_selection_indices:
-                    current_filenames.append( self.database_image_listbox.get( index ) )
+            # Check if we need to refresh filtered images (only if rating filters are active)
+            min_rating = self.min_rating_var.get()
+            max_rating = self.max_rating_var.get()
+            has_rating_filter = min_rating > 0 or max_rating < 10
             
-            # Refresh filtered images with preserved selection (for database tab)
-            if hasattr( self, 'database_image_listbox' ) and current_filenames:
-                self.refresh_filtered_images( preserve_selection=current_filenames )
-            else:
+            if has_rating_filter:
+                # Rating filters are active, need to refresh to potentially hide/show items
                 self.refresh_filtered_images()
+            else:
+                # No rating filters, just update the rating display without full refresh
+                # The rating change doesn't affect which items are shown
+                pass
             
         except Exception as e:
             print( f"Error rating image: {e}" )
