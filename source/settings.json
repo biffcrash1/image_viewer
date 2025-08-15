@@ -1,21 +1,21 @@
 {
-  "last_directory": "F:\\Data\\other\\Conversation Piece",
-  "vertical_paned_pos": 338,
-  "horizontal_paned_pos": 936,
+  "last_directory": "F:\\Data\\other\\FashionablyCasted",
+  "vertical_paned_pos": 335,
+  "horizontal_paned_pos": 501,
   "window": {
-    "width": 1591,
-    "height": 854,
-    "x": 33,
-    "y": 470
+    "width": 1609,
+    "height": 845,
+    "x": 100,
+    "y": 205
   },
   "active_tab": "database",
-  "current_database": "E:\\Data\\_Nates_Stuff\\Photos\\_Nates_Photos\\2015-06-29_phone\\2015-06-29_phone.db",
+  "current_database": "F:\\Data\\other\\FashionablyCasted\\FashionablyCasted.db",
   "recent_databases": [
+    "F:\\Data\\other\\FashionablyCasted\\FashionablyCasted.db",
     "E:\\Data\\_Nates_Stuff\\Photos\\_Nates_Photos\\2015-06-29_phone\\2015-06-29_phone.db",
     "E:/Data/_Nates_Stuff/Photos/Wallpapers/wall1.db",
     "F:\\Data\\other\\Conversation Piece\\Conversation Piece.db",
-    "E:\\Data\\_Nates_Stuff\\Photos\\_Nates_Photos\\2015-05-31_phone\\2015-05-31_phone.db",
-    "F:\\Data\\other\\Quality Control\\qc1.db"
+    "E:\\Data\\_Nates_Stuff\\Photos\\_Nates_Photos\\2015-05-31_phone\\2015-05-31_phone.db"
   ],
   "rating_filter": {
     "min": 0,

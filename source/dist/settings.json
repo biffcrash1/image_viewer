@@ -1,0 +1,21 @@
+{
+  "last_directory": "F:\\Data\\other\\FashionablyCasted",
+  "window": {
+    "width": 1000,
+    "height": 700,
+    "x": 96,
+    "y": 594
+  },
+  "active_tab": "database",
+  "current_database": "F:\\Data\\other\\FashionablyCasted\\FashionablyCasted.db",
+  "recent_databases": [
+    "F:\\Data\\other\\FashionablyCasted\\FashionablyCasted.db"
+  ],
+  "rating_filter": {
+    "min": 0,
+    "max": 10
+  },
+  "show_thumbnails": true,
+  "horizontal_paned_pos": 356,
+  "vertical_paned_pos": 353
+}

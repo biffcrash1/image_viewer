@@ -13,6 +13,602 @@ import threading
 import time
 from pathlib import Path
 import json
+import bisect
+from collections import deque
+import weakref
+
+class TreeviewImageList:
+    """Treeview-based image list that handles large datasets without coordinate limits"""
+    
+    def __init__( self, parent, item_height=50 ):
+        self.parent = parent
+        self.item_height = item_height
+        
+        # Reference to main application
+        self.main_app = None
+        
+        # Data storage
+        self.items = []
+        self.filtered_items = []
+        
+        # Selection tracking
+        self.selected_indices = set()
+        self.selection_callbacks = []
+        self.last_clicked_index = None
+        
+        # Create UI components
+        self.setup_ui()
+        
+    def setup_ui( self ):
+        """Setup the treeview-based list UI"""
+        # Main frame
+        self.frame = ttk.Frame( self.parent )
+        
+        # Create treeview with custom styling
+        style = ttk.Style()
+        style.configure( "ImageList.Treeview", rowheight=self.item_height )
+        
+        # Treeview for image list
+        self.treeview = ttk.Treeview( self.frame, style="ImageList.Treeview", show='tree', selectmode='extended' )
+        self.treeview.heading( '#0', text='Images', anchor='w' )
+        
+        # Scrollbar
+        scrollbar = ttk.Scrollbar( self.frame, orient="vertical", command=self.treeview.yview )
+        self.treeview.configure( yscrollcommand=scrollbar.set )
+        
+        # Pack components
+        self.treeview.pack( side="left", fill="both", expand=True )
+        scrollbar.pack( side="right", fill="y" )
+        
+        # Bind events
+        self.treeview.bind( "<<TreeviewSelect>>", self.on_selection_changed )
+        self.treeview.bind( "<Button-1>", self.on_click )
+        self.treeview.bind( "<Double-Button-1>", self.on_double_click )
+        
+    def set_items( self, items ):
+        """Set the list of items to display"""
+        self.items = items
+        self.filtered_items = items[:]
+        self.selected_indices.clear()
+        self.refresh_treeview()
+        
+    def filter_items( self, filter_func=None ):
+        """Filter items based on a function"""
+        if filter_func:
+            self.filtered_items = [item for item in self.items if filter_func(item)]
+        else:
+            self.filtered_items = self.items[:]
+        
+        self.selected_indices.clear()
+        self.refresh_treeview()
+        
+    def refresh_treeview( self ):
+        """Refresh the treeview with current filtered items"""
+        # Clear existing items
+        for item in self.treeview.get_children():
+            self.treeview.delete( item )
+            
+        # Add filtered items
+        for i, item_data in enumerate( self.filtered_items ):
+            filename = item_data.get( 'filename', 'Unknown' )
+            
+            # For now, show just the filename - thumbnails can be added later
+            display_text = filename
+            if item_data.get( 'show_thumbnails', False ):
+                display_text = f"📷 {filename}"  # Simple thumbnail indicator
+                
+            # Insert item with index as the item ID for easy lookup
+            self.treeview.insert( '', 'end', iid=str(i), text=display_text )
+            
+    def on_selection_changed( self, event ):
+        """Handle treeview selection changes"""
+        selected_items = self.treeview.selection()
+        self.selected_indices = {int(item) for item in selected_items if item.isdigit()}
+        
+        # Notify callbacks
+        for callback in self.selection_callbacks:
+            callback( list(self.selected_indices) )
+            
+    def on_click( self, event ):
+        """Handle click events for proper CTRL/SHIFT selection"""
+        item = self.treeview.identify_row( event.y )
+        if item and item.isdigit():
+            index = int( item )
+            
+            if event.state & 0x4:  # Ctrl key
+                if item in self.treeview.selection():
+                    self.treeview.selection_remove( item )
+                else:
+                    self.treeview.selection_add( item )
+                self.last_clicked_index = index
+                
+            elif event.state & 0x1:  # Shift key
+                if hasattr( self, 'last_clicked_index' ) and self.last_clicked_index is not None:
+                    start_idx = min( self.last_clicked_index, index )
+                    end_idx = max( self.last_clicked_index, index )
+                    
+                    # Select range
+                    items_to_select = [str(i) for i in range(start_idx, end_idx + 1) if i < len(self.filtered_items)]
+                    self.treeview.selection_set( items_to_select )
+                else:
+                    self.treeview.selection_set( item )
+                    self.last_clicked_index = index
+            else:
+                self.treeview.selection_set( item )
+                self.last_clicked_index = index
+                
+        # Trigger selection change manually since we're overriding default behavior
+        self.on_selection_changed( event )
+        
+    def on_double_click( self, event ):
+        """Handle double click events"""
+        item = self.treeview.identify_row( event.y )
+        if item and item.isdigit() and hasattr( self, 'on_item_double_click' ):
+            self.on_item_double_click( int(item), event )
+            
+    def add_selection_callback( self, callback ):
+        """Add a callback for selection changes"""
+        self.selection_callbacks.append( callback )
+        
+    def get_selected_items( self ):
+        """Get currently selected items"""
+        return [self.filtered_items[i] for i in self.selected_indices if i < len(self.filtered_items)]
+        
+    def update_selection_display( self ):
+        """Update visual selection display - compatibility method"""
+        # Treeview handles selection display automatically
+        pass
+        
+    # Compatibility attributes for existing code
+    @property
+    def thumbnail_cache( self ):
+        """Thumbnail cache compatibility"""
+        if not hasattr( self, '_thumbnail_cache' ):
+            self._thumbnail_cache = {}
+        return self._thumbnail_cache
+
+class VirtualScrolledImageList:
+    """Virtual scrolling implementation for large image lists"""
+    
+    def __init__( self, parent, item_height=50, visible_buffer=5 ):
+        self.parent = parent
+        self.item_height = item_height
+        self.visible_buffer = visible_buffer
+        
+        # Reference to main application for thumbnail generation
+        self.main_app = None
+        
+        # Data storage
+        self.items = []
+        self.filtered_items = []
+        self.rendered_items = {}  # Currently rendered widgets {index: widget_data}
+        
+        # Viewport tracking
+        self.viewport_start = 0
+        self.viewport_end = 0
+        self.last_scroll_time = 0
+        
+        # Selection tracking
+        self.selected_indices = set()
+        self.selection_callbacks = []
+        self.last_clicked_index = None  # Track last clicked item for SHIFT selection
+        
+        # Thumbnail caching
+        self.thumbnail_cache = {}
+        self.thumbnail_load_queue = deque()
+        self.thumbnail_loading = False
+        self.max_cache_size = 500
+        
+        # Create UI components
+        self.setup_ui()
+        
+    def setup_ui( self ):
+        """Setup the virtual scrolled list UI"""
+        # Main frame
+        self.frame = ttk.Frame( self.parent )
+        self.frame.focus_set()  # Allow frame to receive focus for mouse wheel events
+        
+        # Canvas for scrolling
+        self.canvas = tk.Canvas( self.frame, highlightthickness=0 )
+        self.scrollbar = ttk.Scrollbar( self.frame, orient="vertical", command=self.on_scroll )
+        self.canvas.configure( yscrollcommand=self.scrollbar.set )
+        
+        # Scrollable frame inside canvas
+        self.scrollable_frame = tk.Frame( self.canvas, bg='white' )
+        self.canvas_window = self.canvas.create_window( 0, 0, anchor="nw", window=self.scrollable_frame )
+        
+        # Pack components
+        self.canvas.pack( side="left", fill="both", expand=True )
+        self.scrollbar.pack( side="right", fill="y" )
+        
+        # Bind mouse wheel to main frame as well
+        self.frame.bind( "<MouseWheel>", self.on_mousewheel )
+        
+        # Bind events
+        self.canvas.bind( "<Configure>", self.on_canvas_configure )
+        self.canvas.bind( "<MouseWheel>", self.on_mousewheel )
+        self.scrollable_frame.bind( "<Configure>", self.on_frame_configure )
+        self.scrollable_frame.bind( "<MouseWheel>", self.on_mousewheel )
+        
+        # Start update loop
+        self.schedule_update()
+        
+    def set_items( self, items ):
+        """Set the list of items to display"""
+        self.items = items
+        self.filtered_items = items[:]
+        self.selected_indices.clear()
+
+        self.update_scroll_region()
+        self.update_viewport()
+        
+    def filter_items( self, filter_func=None ):
+        """Filter items based on a function"""
+        if filter_func:
+            self.filtered_items = [item for item in self.items if filter_func(item)]
+        else:
+            self.filtered_items = self.items[:]
+        
+        self.selected_indices.clear()
+        self.update_scroll_region()
+        self.update_viewport()
+        
+    def update_scroll_region( self ):
+        """Update the scrollable region size"""
+        total_height = len( self.filtered_items ) * self.item_height
+        self.canvas.configure( scrollregion=(0, 0, 0, total_height) )
+        
+        # Set the scrollable frame height to match the total content height
+        self.scrollable_frame.configure( height=total_height )
+        
+
+        
+        # Force canvas to update its internal state
+        self.canvas.update_idletasks()
+        
+    def on_canvas_configure( self, event ):
+        """Handle canvas resize"""
+        canvas_width = event.width
+        self.canvas.itemconfig( self.canvas_window, width=canvas_width )
+        self.update_viewport()
+        
+    def on_frame_configure( self, event ):
+        """Handle frame resize"""
+        # Use the calculated total height instead of bbox for more reliable scrolling
+        total_height = len( self.filtered_items ) * self.item_height
+        self.canvas.configure( scrollregion=(0, 0, 0, total_height) )
+        
+    def on_scroll( self, *args ):
+        """Handle scrollbar movement"""
+        self.canvas.yview( *args )
+        self.last_scroll_time = time.time()
+        self.update_viewport()
+        
+    def on_mousewheel( self, event ):
+        """Handle mouse wheel scrolling"""
+        self.canvas.yview_scroll( int(-1 * (event.delta / 120)), "units" )
+        self.last_scroll_time = time.time()
+        self.update_viewport()
+        
+    def update_viewport( self ):
+        """Update which items should be visible in the viewport"""
+        if not self.filtered_items:
+            return
+            
+        canvas_height = self.canvas.winfo_height()
+        if canvas_height <= 1:
+            # Canvas not yet properly sized, use default height and retry later
+            canvas_height = 400  # Default height for initial calculation
+            self.parent.after( 100, self.update_viewport )  # Retry after canvas is sized
+            return
+            
+        # More robust approach: use both yview and canvasy for cross-validation
+        try:
+            # Method 1: Using scrollbar fractions
+            scroll_top_fraction, scroll_bottom_fraction = self.canvas.yview()
+            total_height = len( self.filtered_items ) * self.item_height
+            scroll_top_method1 = scroll_top_fraction * total_height
+            
+            # Method 2: Using canvas coordinates (original method)
+            scroll_top_method2 = self.canvas.canvasy( 0 )
+            
+            # Use the method that gives more reasonable results
+            # If they're very different, prefer method 1 (scrollbar fractions)
+            if abs( scroll_top_method1 - scroll_top_method2 ) > self.item_height * 2:
+                scroll_top = scroll_top_method1
+            else:
+                scroll_top = scroll_top_method2
+                
+            scroll_bottom = scroll_top + canvas_height
+            
+        except Exception as e:
+            # Ultimate fallback
+            scroll_top = 0
+            scroll_bottom = canvas_height
+            
+        # Calculate visible range with buffer
+        start_index = max( 0, int(scroll_top / self.item_height) - self.visible_buffer )
+        end_index = min( len(self.filtered_items), 
+                        int(scroll_bottom / self.item_height) + self.visible_buffer + 1 )
+        
+        # Ensure we don't have negative or invalid ranges
+        start_index = max( 0, start_index )
+        end_index = max( start_index, min( len(self.filtered_items), end_index ) )
+        
+
+        
+
+        
+        if start_index != self.viewport_start or end_index != self.viewport_end:
+            self.viewport_start = start_index
+            self.viewport_end = end_index
+            self.render_visible_items()
+            
+    def render_visible_items( self ):
+        """Render only the items that should be visible"""
+        # Remove items outside viewport
+        to_remove = []
+        for index in self.rendered_items:
+            if index < self.viewport_start or index >= self.viewport_end:
+                to_remove.append( index )
+                
+        for index in to_remove:
+            self.remove_rendered_item( index )
+            
+        # Add items in viewport
+        items_added = 0
+        items_to_add = []
+        for index in range( self.viewport_start, self.viewport_end ):
+            if index not in self.rendered_items and index < len( self.filtered_items ):
+                items_to_add.append( index )
+                self.render_item( index )
+                items_added += 1
+                
+
+                
+
+                
+    def render_item( self, index ):
+        """Render a single item at the given index"""
+        if index >= len( self.filtered_items ):
+            return
+            
+        item_data = self.filtered_items[index]
+        
+
+        
+        # Create item frame - use tk.Frame instead of ttk.Frame for better visibility
+        item_frame = tk.Frame( self.scrollable_frame, bg='white', relief='flat', bd=1 )
+        y_position = index * self.item_height
+        
+        # Get the actual canvas width for proper sizing
+        try:
+            canvas_width = self.canvas.winfo_width()
+            if canvas_width <= 1:
+                canvas_width = 400  # Default fallback
+        except:
+            canvas_width = 400
+            
+        # Back to simple absolute positioning - let's see what the actual limit is
+        item_frame.place( x=0, y=y_position, width=canvas_width-20, height=self.item_height )
+        
+        # Debug coordinate limits
+        if index > 480 and index < 490:
+            print( f"COORD TEST: Item {index} at y={y_position}" )
+        
+        # Create content frame
+        bg_color = 'lightblue' if index in self.selected_indices else 'white'
+        content_frame = tk.Frame( item_frame, bg=bg_color, relief='flat' )
+        content_frame.pack( fill="both", expand=True, padx=5, pady=2 )
+        
+        # Thumbnail placeholder
+        thumb_label = None
+        thumb_frame = None
+        if item_data.get( 'show_thumbnails', False ) and item_data.get( 'filepath' ):
+            # Create a frame with exact pixel dimensions for 64x64 thumbnails
+            thumb_frame = tk.Frame( content_frame, width=64, height=64, bg=bg_color )
+            thumb_frame.pack( side="left", padx=(0, 5) )
+            thumb_frame.pack_propagate( False )  # Prevent frame from shrinking
+            
+            # Create label to fill the frame
+            thumb_label = tk.Label( thumb_frame, text="", bg=bg_color )
+            thumb_label.pack( fill="both", expand=True )
+            
+            # Queue thumbnail loading
+            self.queue_thumbnail( item_data['filepath'], thumb_label, index )
+            
+        # Filename label
+        filename = item_data.get( 'filename', 'Unknown' )
+        text_label = tk.Label( content_frame, text=filename, anchor="w", bg=bg_color )
+        text_label.pack( side="left", fill="x", expand=True )
+        
+        # Store rendered item data
+        self.rendered_items[index] = {
+            'frame': item_frame,
+            'content_frame': content_frame,
+            'thumb_label': thumb_label,
+            'thumb_frame': thumb_frame,
+            'text_label': text_label,
+            'data': item_data
+        }
+        
+        # Bind click events
+        def on_click( event, idx=index ):
+            self.on_item_click( idx, event )
+            
+        def on_double_click( event, idx=index ):
+            self.on_item_double_click( idx, event )
+            
+        # Bind mouse wheel scrolling to all widgets
+        def on_mousewheel( event ):
+            self.on_mousewheel( event )
+            
+        item_frame.bind( "<Button-1>", on_click )
+        content_frame.bind( "<Button-1>", on_click )
+        text_label.bind( "<Button-1>", on_click )
+        
+        item_frame.bind( "<Double-Button-1>", on_double_click )
+        content_frame.bind( "<Double-Button-1>", on_double_click )
+        text_label.bind( "<Double-Button-1>", on_double_click )
+        
+        # Bind mouse wheel events to all widgets
+        item_frame.bind( "<MouseWheel>", on_mousewheel )
+        content_frame.bind( "<MouseWheel>", on_mousewheel )
+        text_label.bind( "<MouseWheel>", on_mousewheel )
+        
+        if thumb_label:
+            thumb_label.bind( "<Button-1>", on_click )
+            thumb_label.bind( "<Double-Button-1>", on_double_click )
+            thumb_label.bind( "<MouseWheel>", on_mousewheel )
+            
+        if thumb_frame:
+            thumb_frame.bind( "<Button-1>", on_click )
+            thumb_frame.bind( "<Double-Button-1>", on_double_click )
+            thumb_frame.bind( "<MouseWheel>", on_mousewheel )
+            
+    def remove_rendered_item( self, index ):
+        """Remove a rendered item from display"""
+        if index in self.rendered_items:
+            item = self.rendered_items[index]
+            item['frame'].destroy()
+            del self.rendered_items[index]
+            
+    def queue_thumbnail( self, filepath, label, index ):
+        """Queue a thumbnail for loading"""
+        if filepath and os.path.exists( filepath ):
+            self.thumbnail_load_queue.append( (filepath, label, index) )
+            if not self.thumbnail_loading:
+                self.process_thumbnail_queue()
+                
+    def process_thumbnail_queue( self ):
+        """Process thumbnail loading queue in background"""
+        if not self.thumbnail_load_queue:
+            self.thumbnail_loading = False
+            return
+            
+        self.thumbnail_loading = True
+        
+        # Process one thumbnail
+        filepath, label, index = self.thumbnail_load_queue.popleft()
+        
+        def load_thumbnail():
+            try:
+                # Check cache first
+                if filepath in self.thumbnail_cache:
+                    photo = self.thumbnail_cache[filepath]
+                else:
+                    # Use main app's thumbnail method if available
+                    if self.main_app and hasattr( self.main_app, 'get_thumbnail' ):
+                        photo = self.main_app.get_thumbnail( filepath, size=(64, 64) )
+                    else:
+                        # Fallback: Load and create thumbnail
+                        with Image.open( filepath ) as img:
+                            img.thumbnail( (64, 64), Image.Resampling.LANCZOS )
+                            photo = ImageTk.PhotoImage( img )
+                            
+                    if photo:
+                        # Cache thumbnail (with size limit)
+                        if len( self.thumbnail_cache ) >= self.max_cache_size:
+                            oldest_keys = list( self.thumbnail_cache.keys() )[:50]
+                            for key in oldest_keys:
+                                del self.thumbnail_cache[key]
+                        
+                        self.thumbnail_cache[filepath] = photo
+                
+                # Update label on main thread
+                def update_label():
+                    if label.winfo_exists():
+                        label.configure( image=photo, text="" )
+                        label.image = photo
+                        
+                self.parent.after( 0, update_label )
+                
+            except Exception as e:
+                print( f"Error loading thumbnail for {filepath}: {e}" )
+                
+            # Continue processing queue
+            self.parent.after( 10, self.process_thumbnail_queue )
+            
+        # Load thumbnail in background thread
+        threading.Thread( target=load_thumbnail, daemon=True ).start()
+        
+    def on_item_click( self, index, event ):
+        """Handle item click"""
+        # Handle selection with proper CTRL and SHIFT behavior
+        if event.state & 0x4:  # Ctrl key (0x4 is the correct bitmask for Ctrl)
+            # CTRL-click: Toggle individual selection
+            if index in self.selected_indices:
+                self.selected_indices.remove( index )
+            else:
+                self.selected_indices.add( index )
+            # Update last clicked for potential SHIFT operations
+            self.last_clicked_index = index
+            
+        elif event.state & 0x1:  # Shift key (0x1 is the correct bitmask for Shift)
+            # SHIFT-click: Range selection
+            if hasattr( self, 'last_clicked_index' ) and self.last_clicked_index is not None:
+                # Select range from last clicked to current
+                start_idx = min( self.last_clicked_index, index )
+                end_idx = max( self.last_clicked_index, index )
+                
+                # Add all indices in range to selection
+                for i in range( start_idx, end_idx + 1 ):
+                    self.selected_indices.add( i )
+            else:
+                # No previous selection, just select current
+                self.selected_indices.clear()
+                self.selected_indices.add( index )
+                self.last_clicked_index = index
+                
+        else:
+            # Regular click: Clear selection and select only this item
+            self.selected_indices.clear()
+            self.selected_indices.add( index )
+            self.last_clicked_index = index
+            
+        # Update visual selection
+        self.update_selection_display()
+        
+        # Notify callbacks
+        for callback in self.selection_callbacks:
+            callback( list(self.selected_indices) )
+            
+    def on_item_double_click( self, index, event ):
+        """Handle item double click - override in subclass"""
+        pass
+        
+    def update_selection_display( self ):
+        """Update the visual display of selected items"""
+        for index, item in self.rendered_items.items():
+            bg_color = 'lightblue' if index in self.selected_indices else 'white'
+            if item['text_label']:
+                item['text_label'].configure( bg=bg_color )
+            if item['thumb_label']:
+                item['thumb_label'].configure( bg=bg_color )
+            if item['thumb_frame']:
+                item['thumb_frame'].configure( bg=bg_color )
+            if item['content_frame']:
+                item['content_frame'].configure( bg=bg_color )
+                
+    def get_selected_items( self ):
+        """Get currently selected items"""
+        return [self.filtered_items[i] for i in self.selected_indices if i < len(self.filtered_items)]
+        
+    def add_selection_callback( self, callback ):
+        """Add a callback for selection changes"""
+        self.selection_callbacks.append( callback )
+        
+    def schedule_update( self ):
+        """Schedule periodic updates"""
+        current_time = time.time()
+        if current_time - self.last_scroll_time > 0.1:
+            self.update_viewport()
+            
+        # Update status in main app if available
+        if hasattr( self, 'main_app' ) and self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+            self.main_app.update_image_list_status()
+            
+        self.parent.after( 100, self.schedule_update )
 
 class ImageViewer:
     def __init__( self, root ):
@@ -463,33 +1059,31 @@ class ImageViewer:
         image_list_frame = ttk.Frame( image_frame )
         image_list_frame.pack( fill=tk.BOTH, expand=True )
         
-        # Create scrollable canvas for image list (supports thumbnails)
-        self.image_list_canvas = tk.Canvas( image_list_frame, bg='white' )
-        image_scrollbar = ttk.Scrollbar( image_list_frame, orient=tk.VERTICAL, command=self.on_scrollbar_move )
-        self.image_list_scrollable_frame = ttk.Frame( self.image_list_canvas )
+        # Create treeview-based image list that handles large datasets properly
+        self.virtual_image_list = TreeviewImageList( image_list_frame, item_height=68 )
+        self.virtual_image_list.frame.pack( fill=tk.BOTH, expand=True )
         
-        self.image_list_scrollable_frame.bind( "<Configure>", lambda e: self.image_list_canvas.configure( scrollregion=self.image_list_canvas.bbox( "all" ) ) )
-        self.image_list_canvas.create_window( (0, 0), window=self.image_list_scrollable_frame, anchor="nw" )
-        self.image_list_canvas.configure( yscrollcommand=image_scrollbar.set )
+        # Add status label below the image list
+        self.image_list_status_label = ttk.Label( image_list_frame, text="0 of 0 images (0 selected)", font=('TkDefaultFont', 9) )
+        self.image_list_status_label.pack( side=tk.BOTTOM, pady=(5, 0) )
         
-        self.image_list_canvas.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
-        image_scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        # Add debug button for testing
+        debug_button = ttk.Button( image_list_frame, text="Debug Viewport", command=self.debug_virtual_scrolling )
+        debug_button.pack( side=tk.BOTTOM, pady=(2, 0) )
         
-        # Enable mouse wheel scrolling
-        def on_image_list_scroll( event ):
-            self.image_list_canvas.yview_scroll( int( -1 * (event.delta / 120) ), "units" )
-            # Visibility checking runs continuously, no need to trigger here
-        self.image_list_canvas.bind( "<MouseWheel>", on_image_list_scroll )
+        # Set reference to main app for thumbnail generation
+        self.virtual_image_list.main_app = self
         
-        # Also bind to the scrollable frame to catch events in gaps between items
-        self.image_list_scrollable_frame.bind( "<MouseWheel>", on_image_list_scroll )
+        # Set up callbacks for selection and double-click
+        self.virtual_image_list.add_selection_callback( self.on_virtual_selection_changed )
+        self.virtual_image_list.on_item_double_click = self.on_virtual_double_click
         
-        # Store the scroll function for binding to child widgets
-        self._image_list_scroll_handler = on_image_list_scroll
-        
-        # Initialize image list items tracking
-        self.image_list_items = []  # List of item data: {'filename': str, 'frame': widget, 'selected': bool}
+        # Compatibility attributes for existing code
+        self.image_list_items = []  # Will be synced with virtual list
         self.selected_image_indices = []  # Track selected indices for compatibility
+        
+        # Initialize database_image_listbox property for compatibility
+        self.database_image_listbox = self.DatabaseImageListboxCompat( self )
         
         # Initialize tag filters and checkbox tracking
         self.included_or_tags = set()
@@ -499,6 +1093,64 @@ class ImageViewer:
         self.all_include_or_var = tk.BooleanVar()
         self.all_include_and_var = tk.BooleanVar()
         self.all_exclude_var = tk.BooleanVar()
+        
+    def update_image_list_status( self ):
+        """Update the status label showing image count and selection info"""
+        if hasattr( self, 'virtual_image_list' ) and hasattr( self, 'image_list_status_label' ):
+            total_images = len( self.virtual_image_list.filtered_items )
+            selected_count = len( self.virtual_image_list.selected_indices )
+            
+            # Find the highest selected item number (if any)
+            if self.virtual_image_list.selected_indices:
+                last_selected_item = max( self.virtual_image_list.selected_indices ) + 1  # +1 for human-readable numbering
+                status_text = f"{total_images} images total, {selected_count} selected, item number {last_selected_item} selected"
+            else:
+                status_text = f"{total_images} images total, {selected_count} selected"
+                
+            self.image_list_status_label.configure( text=status_text )
+            
+    def debug_virtual_scrolling( self ):
+        """Debug method to print virtual scrolling information immediately"""
+        if hasattr( self, 'virtual_image_list' ):
+            vlist = self.virtual_image_list
+            print( "\n=== VIRTUAL SCROLLING DEBUG ===" )
+            print( f"Total filtered items: {len(vlist.filtered_items)}" )
+            print( f"Rendered items: {len(vlist.rendered_items)}" )
+            print( f"Viewport: start={vlist.viewport_start}, end={vlist.viewport_end}" )
+            print( f"Percentage through list: {(vlist.viewport_end / len(vlist.filtered_items) * 100):.1f}%" )
+            
+            # Check data integrity around problematic area
+            print( "\nChecking data integrity around index 500..." )
+            for i in [499, 500, 501, 502, 503]:
+                if i < len( vlist.filtered_items ):
+                    item = vlist.filtered_items[i]
+                    filename = item.get( 'filename', 'NO_FILENAME' )
+                    filepath = item.get( 'filepath', 'NO_FILEPATH' )
+                    exists = os.path.exists( filepath ) if filepath else False
+                    print( f"Index {i}: {filename}, exists: {exists}" )
+            
+            print( "\nChecking data integrity near the end..." )
+            end_indices = [2930, 2931, 2932, 2933, 2934]
+            for i in end_indices:
+                if i < len( vlist.filtered_items ):
+                    item = vlist.filtered_items[i]
+                    filename = item.get( 'filename', 'NO_FILENAME' )
+                    filepath = item.get( 'filepath', 'NO_FILEPATH' )
+                    exists = os.path.exists( filepath ) if filepath else False
+                    print( f"Index {i}: {filename}, exists: {exists}" )
+            
+            # Test scrolling to problem area
+            print( "\nTesting scroll to index 500 area..." )
+            try:
+                # Scroll to around index 500 (500/2935 ≈ 0.17)
+                vlist.canvas.yview_moveto( 0.17 )
+                vlist.update_viewport()
+                print( f"At 17% position - Viewport: start={vlist.viewport_start}, end={vlist.viewport_end}" )
+                
+            except Exception as e:
+                print( f"Error testing scroll to 500 area: {e}" )
+                
+            print( "=== END DEBUG ===\n" )
         
     def populate_drives( self ):
         """Populate the drive selection combobox with available drives"""
@@ -1143,6 +1795,89 @@ class ImageViewer:
             
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
+    
+    def ensure_database_indexes( self, conn=None ):
+        """Ensure database indexes exist for better query performance"""
+        try:
+            if conn is None:
+                if not self.current_database:
+                    return
+                conn = self.current_database
+            
+            cursor = conn.cursor()
+            
+            # Create indexes for common queries
+            indexes = [
+                "CREATE INDEX IF NOT EXISTS idx_images_filename ON images(filename)",
+                "CREATE INDEX IF NOT EXISTS idx_images_rating ON images(rating)",
+                "CREATE INDEX IF NOT EXISTS idx_image_tags_image_id ON image_tags(image_id)",
+                "CREATE INDEX IF NOT EXISTS idx_image_tags_tag_id ON image_tags(tag_id)",
+                "CREATE INDEX IF NOT EXISTS idx_tags_name ON tags(name)",
+                "CREATE INDEX IF NOT EXISTS idx_images_relative_path ON images(relative_path)"
+            ]
+            
+            for index_sql in indexes:
+                cursor.execute( index_sql )
+                
+            conn.commit()
+            print( "Database indexes ensured for optimal performance" )
+            
+        except Exception as e:
+            print( f"Error creating database indexes: {e}" )
+    
+    def on_virtual_selection_changed( self, selected_indices ):
+        """Handle selection changes in virtual image list"""
+        self.selected_image_indices = selected_indices
+        
+        # Update status label
+        self.update_image_list_status()
+        
+        if selected_indices:
+            # Get the first selected item
+            if selected_indices[0] < len( self.virtual_image_list.filtered_items ):
+                item_data = self.virtual_image_list.filtered_items[selected_indices[0]]
+                # Use the filepath directly from item_data instead of looking up by filename
+                # This fixes the duplicate filename issue
+                filepath = item_data.get( 'filepath' )
+                
+                if len( selected_indices ) == 1:
+                    # Single selection - show preview
+                    if filepath and os.path.exists( filepath ):
+                        self.current_database_image = filepath
+                        self.display_image_preview( filepath, self.database_preview_label )
+                        self.selected_image_files = [filepath]
+                        self.load_image_tags_for_editing()
+                else:
+                    # Multiple selection - show count
+                    filepaths = []
+                    for idx in selected_indices:
+                        if idx < len( self.virtual_image_list.filtered_items ):
+                            item = self.virtual_image_list.filtered_items[idx]
+                            # Use filepath directly instead of looking up by filename
+                            path = item.get( 'filepath' )
+                            if path and os.path.exists( path ):
+                                filepaths.append( path )
+                    
+                    self.selected_image_files = filepaths
+                    self.current_database_image = None
+                    self.database_preview_label.configure( image="", text=f"{len(selected_indices)} images selected" )
+                    self.database_preview_label.image = None
+                    self.load_image_tags_for_editing()
+        else:
+            # No selection
+            self.current_database_image = None
+            self.selected_image_files = []
+            self.database_preview_label.configure( image="", text="No selection" )
+            self.database_preview_label.image = None
+    
+    def on_virtual_double_click( self, index, event ):
+        """Handle double click in virtual image list"""
+        if index < len( self.virtual_image_list.filtered_items ):
+            item_data = self.virtual_image_list.filtered_items[index]
+            filename = item_data['filename']
+            filepath = self.find_image_path( filename )
+            if filepath:
+                self.enter_fullscreen_mode( filepath )
             
     def create_database_here( self ):
         """Create a new database in the currently browsed directory"""
@@ -1663,6 +2398,11 @@ class ImageViewer:
             if not required_tables.issubset( existing_tables ):
                 messagebox.showerror( "Error", "Invalid database file - missing required tables" )
                 return
+            
+            # Ensure database indexes exist for better performance
+            conn = sqlite3.connect( db_path )
+            self.ensure_database_indexes( conn )
+            conn.close()
                 
             self.current_database_path = db_path
             self.current_database = os.path.dirname( db_path )
@@ -1849,11 +2589,14 @@ class ImageViewer:
             return
         
         # Store current selection if not provided
-        if preserve_selection is None and hasattr( self, 'database_image_listbox' ):
-            current_selection = list( self.database_image_listbox.curselection() )
+        if preserve_selection is None:
             preserve_selection = []
-            for index in current_selection:
-                preserve_selection.append( self.database_image_listbox.get( index ) )
+            if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+                # Get current selection from virtual list
+                for index in sorted( self.virtual_image_list.selected_indices ):
+                    if index < len( self.virtual_image_list.filtered_items ):
+                        filename = self.virtual_image_list.filtered_items[index]['filename']
+                        preserve_selection.append( filename )
             
         try:
             conn = sqlite3.connect( self.current_database_path )
@@ -1913,45 +2656,52 @@ class ImageViewer:
             cursor.execute( query, params )
             images = cursor.fetchall()
             
-            # Clear and populate the new image list
+            # Clear and populate the virtual image list
             self.clear_image_list()
+            
+            # Create item data for virtual scrolling
+            virtual_items = []
             for relative_path, filename in images:
                 filepath = os.path.join( self.current_database, relative_path ) if relative_path else None
-                self.add_image_list_item( filename, filepath )
-                
+                virtual_items.append( {
+                    'filename': filename,
+                    'filepath': filepath,
+                    'show_thumbnails': self.show_thumbnails.get()
+                } )
+            
+            # Set items in virtual list
+            self.virtual_image_list.set_items( virtual_items )
+            
+            # Update status label
+            self.update_image_list_status()
+            
             # Handle selection restoration
             filtered_filenames = [filename for relative_path, filename in images]
             
             # If we have a preserved selection, try to restore it
             if preserve_selection and filtered_filenames:
-                # Temporarily unbind the select event to prevent interference
-                self.database_image_listbox.unbind( "<<ListboxSelect>>" )
-                
-                self.database_image_listbox.selection_clear( 0, tk.END )
-                restored_any = False
+                restored_indices = []
                 
                 for filename in preserve_selection:
                     if filename in filtered_filenames:
                         try:
                             index = filtered_filenames.index( filename )
-                            self.database_image_listbox.selection_set( index )
-                            restored_any = True
+                            restored_indices.append( index )
                         except ValueError:
                             pass
                 
-                if restored_any:
-                    # Ensure the first selected item is visible
-                    first_selected = self.database_image_listbox.curselection()
-                    if first_selected:
-                        self.database_image_listbox.see( first_selected[0] )
+                if restored_indices:
+                    # Restore selection in virtual list
+                    self.virtual_image_list.selected_indices = set( restored_indices )
+                    self.virtual_image_list.update_selection_display()
+                    # Trigger selection callback
+                    self.on_virtual_selection_changed( restored_indices )
                 else:
                     # None of the preserved selection is in filtered list - select first
                     if filtered_filenames:
-                        self.database_image_listbox.selection_set( 0 )
-                        self.database_image_listbox.see( 0 )
-                
-                # Re-bind the select event
-                self.database_image_listbox.bind( "<<ListboxSelect>>", self.on_database_image_select )
+                        self.virtual_image_list.selected_indices = {0}
+                        self.virtual_image_list.update_selection_display()
+                        self.on_virtual_selection_changed( [0] )
                 
             elif filtered_filenames and not preserve_selection:
                 # No preserved selection - use smart preview logic
@@ -1963,23 +2713,17 @@ class ImageViewer:
                     # Current image is still in filtered list - select it
                     try:
                         current_index = filtered_filenames.index( current_filename )
-                        self.database_image_listbox.selection_set( current_index )
-                        self.database_image_listbox.see( current_index )
+                        self.virtual_image_list.selected_indices = {current_index}
+                        self.virtual_image_list.update_selection_display()
+                        self.on_virtual_selection_changed( [current_index] )
                     except ValueError:
                         pass
                 else:
                     # Current image is not in filtered list - select first image
-                    self.database_image_listbox.selection_set( 0 )
-                    self.database_image_listbox.see( 0 )
-                    
-                    # Update preview to show first image
-                    first_filename = filtered_filenames[0]
-                    first_filepath = self.find_image_path( first_filename )
-                    if first_filepath:
-                        self.current_database_image = first_filepath
-                        self.display_image_preview( first_filepath, self.database_preview_label )
-                        self.selected_image_files = [first_filepath]
-                        self.load_image_tags_for_editing()
+                    if filtered_filenames:
+                        self.virtual_image_list.selected_indices = {0}
+                        self.virtual_image_list.update_selection_display()
+                        self.on_virtual_selection_changed( [0] )
             
             if not filtered_filenames:
                 # No images in filtered list - clear preview
@@ -3161,15 +3905,15 @@ class ImageViewer:
     
     def on_thumbnails_toggle( self ):
         """Handle the Show Thumbnails option toggle"""
-        # Clear the thumbnail loading queue and timers
-        self.thumbnail_load_queue.clear()
-        self.thumbnail_loading = False
-        self.visible_items_timer.clear()
-        
-        # Stop visibility checking
-        if self.visibility_check_timer:
-            self.root.after_cancel( self.visibility_check_timer )
-            self.visibility_check_timer = None
+        # Update thumbnail setting for all items in virtual list
+        if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+            show_thumbs = self.show_thumbnails.get()
+            for item in self.virtual_image_list.items:
+                item['show_thumbnails'] = show_thumbs
+            
+            # Clear thumbnail cache if disabling thumbnails
+            if not show_thumbs:
+                self.virtual_image_list.thumbnail_cache.clear()
         
         # Refresh the filtered images list to show/hide thumbnails
         if self.current_database_path:
@@ -3210,9 +3954,9 @@ class ImageViewer:
                 photo = ImageTk.PhotoImage( img )
                 
                 # Cache the thumbnail (limit cache size)
-                if len( self.thumbnail_cache ) >= 200:  # Limit thumbnail cache
+                if len( self.thumbnail_cache ) >= 500:  # Increased cache size for better performance
                     # Remove oldest entries
-                    oldest_keys = list( self.thumbnail_cache.keys() )[:50]
+                    oldest_keys = list( self.thumbnail_cache.keys() )[:100]
                     for key in oldest_keys:
                         del self.thumbnail_cache[key]
                 
@@ -3225,80 +3969,19 @@ class ImageViewer:
     
     def clear_image_list( self ):
         """Clear all items from the image list"""
-        for item in self.image_list_items:
-            if 'frame' in item and item['frame']:
-                item['frame'].destroy()
+        if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+            # Clear virtual list
+            self.virtual_image_list.set_items( [] )
+        
+        # Clear compatibility attributes
         self.image_list_items.clear()
         self.selected_image_indices.clear()
-        # Clear thumbnail loading queue and timers
-        self.thumbnail_load_queue.clear()
-        self.thumbnail_loading = False
-        self.visible_items_timer.clear()
-        
-        # Stop visibility checking
-        if self.visibility_check_timer:
-            self.root.after_cancel( self.visibility_check_timer )
-            self.visibility_check_timer = None
     
     def add_image_list_item( self, filename, filepath=None ):
-        """Add an item to the image list with optional thumbnail"""
-        item_frame = ttk.Frame( self.image_list_scrollable_frame )
-        item_frame.pack( fill=tk.X, padx=2, pady=1 )
-        
-        # Create inner frame for thumbnail and text
-        content_frame = tk.Frame( item_frame, relief=tk.FLAT, bg='white' )
-        content_frame.pack( fill=tk.BOTH, expand=True )
-        
-        # Create the click handlers before using them
-        current_index = len( self.image_list_items )
-        
-        def on_click( event, index=current_index ):
-            self.on_image_list_click( index, event )
-        
-        def on_double_click( event, index=current_index ):
-            self.on_image_list_double_click( index, event )
-        
-        # Create placeholder for thumbnail
-        thumb_label = None
-        if self.show_thumbnails.get() and filepath:
-            # Create placeholder thumbnail label (will be loaded lazily)
-            thumb_label = tk.Label( content_frame, text="", bg='white', width=8, height=4 )
-            thumb_label.pack( side=tk.LEFT, padx=5, pady=2 )
-            # Bind events to thumbnail label
-            thumb_label.bind( "<Button-1>", on_click )
-            thumb_label.bind( "<Double-Button-1>", on_double_click )
-            thumb_label.bind( "<MouseWheel>", self._image_list_scroll_handler )
-        
-        # Add filename label
-        text_label = tk.Label( content_frame, text=filename, anchor=tk.W, bg='white' )
-        text_label.pack( side=tk.LEFT, fill=tk.X, expand=True, padx=5, pady=2 )
-        
-        # Store item data
-        item_data = {
-            'filename': filename,
-            'filepath': filepath,
-            'frame': item_frame,
-            'content_frame': content_frame,
-            'thumb_label': thumb_label,
-            'text_label': text_label,
-            'selected': False,
-            'index': current_index,
-            'thumbnail_loaded': False
-        }
-        self.image_list_items.append( item_data )
-        
-        # Bind events to item frame, content frame and text label
-        item_frame.bind( "<MouseWheel>", self._image_list_scroll_handler )
-        content_frame.bind( "<Button-1>", on_click )
-        content_frame.bind( "<Double-Button-1>", on_double_click )
-        content_frame.bind( "<MouseWheel>", self._image_list_scroll_handler )
-        text_label.bind( "<Button-1>", on_click )
-        text_label.bind( "<Double-Button-1>", on_double_click )
-        text_label.bind( "<MouseWheel>", self._image_list_scroll_handler )
-        
-        # Don't immediately add to queue - will be added when item becomes visible
-        
-        return item_data
+        """Add an item to the image list - compatibility method for virtual scrolling"""
+        # This method is now handled by virtual scrolling in refresh_filtered_images
+        # Keep for compatibility but functionality moved to virtual list
+        return None
     
     def on_scrollbar_move( self, *args ):
         """Handle scrollbar movement"""
@@ -3333,7 +4016,7 @@ class ImageViewer:
             else:
                 # Check if item has been visible for 200ms
                 time_visible = current_time - self.visible_items_timer[item_id]
-                if (time_visible >= 0.2 and 
+                if (time_visible >= 0.3 and  # Increased delay to reduce CPU usage 
                     not item['thumbnail_loaded'] and 
                     item not in self.thumbnail_load_queue and 
                     item['filepath'] and 
@@ -3348,7 +4031,7 @@ class ImageViewer:
         # Schedule next visibility check
         if self.visibility_check_timer:
             self.root.after_cancel( self.visibility_check_timer )
-        self.visibility_check_timer = self.root.after( 100, self.check_visible_thumbnails )
+        self.visibility_check_timer = self.root.after( 200, self.check_visible_thumbnails )  # Reduced frequency for better performance
     
     def process_thumbnail_queue( self ):
         """Process the thumbnail loading queue lazily"""
@@ -3505,54 +4188,56 @@ class ImageViewer:
     
     # Compatibility methods to work with existing code that expects listbox interface
     class DatabaseImageListboxCompat:
-        """Compatibility wrapper to make new image list work like old listbox"""
+        """Compatibility wrapper to make virtual image list work like old listbox"""
         def __init__( self, parent ):
             self.parent = parent
         
         def curselection( self ):
             """Return selected indices like listbox.curselection()"""
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                return tuple( sorted( self.parent.virtual_image_list.selected_indices ) )
             return tuple( self.parent.selected_image_indices )
         
         def get( self, index ):
             """Get filename at index like listbox.get()"""
-            if 0 <= index < len( self.parent.image_list_items ):
-                return self.parent.image_list_items[index]['filename']
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                if 0 <= index < len( self.parent.virtual_image_list.filtered_items ):
+                    return self.parent.virtual_image_list.filtered_items[index]['filename']
             return ""
         
         def size( self ):
             """Return number of items like listbox.size()"""
-            return len( self.parent.image_list_items )
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                return len( self.parent.virtual_image_list.filtered_items )
+            return 0
         
         def selection_clear( self, start, end=None ):
             """Clear selection like listbox.selection_clear()"""
-            if start == 0 and end == tk.END:
-                self.parent.clear_image_list_selection()
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                if start == 0 and end == tk.END:
+                    self.parent.virtual_image_list.selected_indices.clear()
+                    self.parent.virtual_image_list.update_selection_display()
         
         def selection_set( self, index ):
             """Set selection like listbox.selection_set()"""
-            self.parent.select_image_list_item( index )
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                self.parent.virtual_image_list.selected_indices.add( index )
+                self.parent.virtual_image_list.update_selection_display()
         
         def see( self, index ):
             """Scroll to make item visible like listbox.see()"""
-            if 0 <= index < len( self.parent.image_list_items ):
-                item = self.parent.image_list_items[index]
-                # Scroll the canvas to make the item visible
-                self.parent.image_list_canvas.update_idletasks()
-                try:
-                    # Get the position of the item frame
-                    frame = item['frame']
-                    frame.update_idletasks()
-                    y_pos = frame.winfo_y()
-                    frame_height = frame.winfo_height()
-                    canvas_height = self.parent.image_list_canvas.winfo_height()
+            if hasattr( self.parent, 'virtual_image_list' ) and self.parent.virtual_image_list:
+                if 0 <= index < len( self.parent.virtual_image_list.filtered_items ):
+                    # Calculate scroll position to make item visible
+                    item_y = index * self.parent.virtual_image_list.item_height
+                    canvas = self.parent.virtual_image_list.canvas
+                    canvas_height = canvas.winfo_height()
                     
-                    # Calculate the relative position
-                    total_height = self.parent.image_list_scrollable_frame.winfo_reqheight()
+                    # Scroll to center the item
+                    total_height = len( self.parent.virtual_image_list.filtered_items ) * self.parent.virtual_image_list.item_height
                     if total_height > 0:
-                        relative_pos = y_pos / total_height
-                        self.parent.image_list_canvas.yview_moveto( relative_pos )
-                except Exception as e:
-                    print( f"Error in see() method: {e}" )
+                        scroll_pos = max( 0, min( 1.0, item_y / total_height ) )
+                        canvas.yview_moveto( scroll_pos )
         
         def bind( self, event, callback ):
             """Bind events - for compatibility, but events are handled in the new system"""
@@ -3562,13 +4247,7 @@ class ImageViewer:
             """Unbind events - for compatibility"""
             pass  # Events are handled by individual item frames
     
-    # Create compatibility wrapper
-    @property
-    def database_image_listbox( self ):
-        """Property to provide listbox-like interface"""
-        if not hasattr( self, '_listbox_compat' ):
-            self._listbox_compat = self.DatabaseImageListboxCompat( self )
-        return self._listbox_compat
+    # database_image_listbox is now initialized directly in setup_database_tab
     
     def load_image_metadata_lazy( self, filepath ):
         """Lazily load image metadata (rating, tags, dimensions) with caching"""
