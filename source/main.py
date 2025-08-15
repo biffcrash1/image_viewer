@@ -1828,46 +1828,35 @@ class ImageViewer:
         """Update the file tags display with tags from the selected image file"""
         # Check if the widget exists (might be called before UI is fully initialized)
         if not hasattr( self, 'file_tags_text' ):
-            print( "DEBUG: file_tags_text widget not found!" )
             return
-            
-        print( f"DEBUG: update_file_tags_display called with: {filepath}" )
             
         # Clear the text widget
         self.file_tags_text.configure( state=tk.NORMAL )
         self.file_tags_text.delete( 1.0, tk.END )
         
         if filepath and os.path.exists( filepath ):
-            print( f"DEBUG: File exists, extracting tags from: {filepath}" )
             try:
                 # Extract tags from the image file
                 file_tags = self.extract_image_file_tags( filepath )
-                print( f"DEBUG: Extracted tags: {file_tags}" )
                 
                 if file_tags:
                     # Display the tags
                     tags_text = "\n".join( f"• {tag}" for tag in file_tags )
                     self.file_tags_text.insert( tk.END, tags_text )
-                    print( f"DEBUG: Inserted tags into widget: {tags_text}" )
                 else:
                     self.file_tags_text.insert( tk.END, "No tags found in image file" )
-                    print( "DEBUG: No tags found" )
                     
             except Exception as e:
                 error_msg = f"Error reading file tags:\n{str(e)}"
                 self.file_tags_text.insert( tk.END, error_msg )
-                print( f"DEBUG: Exception occurred: {e}" )
         else:
             if not filepath:
                 self.file_tags_text.insert( tk.END, "No image selected" )
-                print( "DEBUG: No filepath provided" )
             else:
                 self.file_tags_text.insert( tk.END, "Image file not found" )
-                print( f"DEBUG: File not found: {filepath}" )
         
         # Make text widget read-only again
         self.file_tags_text.configure( state=tk.DISABLED )
-        print( "DEBUG: Widget updated and set to disabled" )
 
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
@@ -3163,7 +3152,7 @@ class ImageViewer:
                     self.selected_image_files = [filepath]
                     self.load_image_tags_for_editing()
                     # Update file tags display for single selection (after loading tags)
-                                self.update_file_tags_display( filepath )
+                    self.update_file_tags_display( filepath )
             else:
                 # Multiple selection - load tags for bulk editing
                 filenames = [self.database_image_listbox.get( i ) for i in selection]
