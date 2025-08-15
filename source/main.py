@@ -94,9 +94,17 @@ class TreeviewImageList:
         self.treeview.bind( "<Button-1>", self.on_click )
         self.treeview.bind( "<Double-Button-1>", self.on_double_click )
         
+        # Bind keyboard events
+        self.treeview.bind( "<Control-a>", self.select_all )
+        self.treeview.bind( "<Control-A>", self.select_all )
+        
         # Bind scroll events for thumbnail loading debouncing
         self.treeview.bind( "<MouseWheel>", self.on_scroll )
         scrollbar.bind( "<ButtonRelease-1>", self.on_scroll_release )
+        
+        # Also bind Ctrl+A to the main frame for better accessibility
+        self.frame.bind( "<Control-a>", self.select_all )
+        self.frame.bind( "<Control-A>", self.select_all )
         
     def set_items( self, items ):
         """Set the list of items to display"""
@@ -770,6 +778,26 @@ class TreeviewImageList:
         # Schedule next periodic check
         self.parent.after( 2000, self.periodic_verification )  # Every 2 seconds
 
+    def select_all( self, event ):
+        """Select all items in the filtered list"""
+        if self.filtered_items:
+            # Select all filtered items
+            all_item_ids = [str(i) for i in range(len(self.filtered_items))]
+            self.treeview.selection_set( all_item_ids )
+            
+            # Update selected indices
+            self.selected_indices = set(range(len(self.filtered_items)))
+            
+            # Notify callbacks
+            for callback in self.selection_callbacks:
+                callback( list(self.selected_indices) )
+            
+            # Update status if main app is available
+            if self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+                self.main_app.update_image_list_status()
+            
+            return "break"  # Prevent default behavior
+
 
 class ImageViewer:
     def __init__( self, root ):
@@ -1275,6 +1303,10 @@ class ImageViewer:
         # Add status label at the top of the image list
         self.image_list_status_label = ttk.Label( image_list_frame, text="0 total items, 0 selected", font=('TkDefaultFont', 9) )
         self.image_list_status_label.pack( side=tk.TOP, pady=(0, 5) )
+        
+        # Add keyboard shortcut hint
+        shortcut_hint = ttk.Label( image_list_frame, text="Ctrl+A: Select all images", font=('TkDefaultFont', 8), foreground='gray' )
+        shortcut_hint.pack( side=tk.TOP, pady=(0, 5) )
         
         # Add debug button for testing
         debug_button = ttk.Button( image_list_frame, text="Debug Viewport", command=self.debug_virtual_scrolling )
@@ -3341,25 +3373,46 @@ class ImageViewer:
         if not self.selected_image_files or not self.current_database_path:
             return
             
+        # Check if we have a large selection that might cause freezing
+        if len( self.selected_image_files ) > 50:
+            # For large selections, show a warning and ask for confirmation
+            response = messagebox.askyesno( 
+                "Large Selection Warning", 
+                f"You have {len(self.selected_image_files)} images selected. "
+                "Applying tag changes to this many images may take a while and could temporarily freeze the app. "
+                "Do you want to continue?"
+            )
+            if not response:
+                return
+                
+            # For very large selections, use async processing
+            if len( self.selected_image_files ) > 100:
+                self.root.after( 1, lambda: self.apply_single_tag_change_async( tag_id, is_checked ) )
+                return
+            
         try:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
-            # Get image IDs for the selected files
-            image_ids = []
-            for filepath in self.selected_image_files:
-                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
-                cursor.execute( "SELECT id FROM images WHERE relative_path = ?", (relative_path,) )
-                result = cursor.fetchone()
-                if result:
-                    image_ids.append( result[0] )
+            # Optimize: Get all image IDs in a single query instead of one per file
+            relative_paths = [os.path.relpath( filepath, os.path.dirname( self.current_database_path ) ) 
+                            for filepath in self.selected_image_files]
+            
+            # Use a single query with IN clause for better performance
+            placeholders = ','.join( ['?'] * len( relative_paths ) )
+            cursor.execute( f"SELECT id, relative_path FROM images WHERE relative_path IN ({placeholders})", 
+                          relative_paths )
+            results = cursor.fetchall()
+            
+            # Create a mapping of relative_path to image_id
+            path_to_id = {row[1]: row[0] for row in results}
+            image_ids = [path_to_id[rel_path] for rel_path in relative_paths if rel_path in path_to_id]
             
             if not image_ids:
                 conn.close()
                 return
                 
-            # Apply the tag change
-            # Apply tag changes to all selected images using batch operations
+            # Apply the tag change using batch operations
             if is_checked:
                 # Batch add tag to images
                 batch_data = [(image_id, tag_id) for image_id in image_ids]
@@ -3378,12 +3431,108 @@ class ImageViewer:
             for filepath in self.selected_image_files:
                 self.invalidate_image_cache( filepath )
             
-            # Refresh views to reflect changes
-            self.refresh_database_view()
-            self.refresh_filtered_images()
+            # For large selections, only refresh filtered images, not the entire database view
+            if len( self.selected_image_files ) > 20:
+                self.refresh_filtered_images()
+            else:
+                # For small selections, refresh everything
+                self.refresh_database_view()
+                self.refresh_filtered_images()
             
         except Exception as e:
             print( f"Error applying tag change: {e}" )
+            messagebox.showerror( "Error", f"Failed to apply tag change: {str(e)}" )
+            
+    def apply_single_tag_change_async( self, tag_id, is_checked ):
+        """Apply tag changes asynchronously for very large selections to prevent freezing"""
+        try:
+            # Show progress dialog
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Applying Tag Changes" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50) )
+            
+            # Progress label
+            progress_label = ttk.Label( progress_window, text="Applying tag changes to images..." )
+            progress_label.pack( pady=20 )
+            
+            # Progress bar
+            progress_bar = ttk.Progressbar( progress_window, mode='indeterminate' )
+            progress_bar.pack( fill=tk.X, padx=20, pady=10 )
+            progress_bar.start()
+            
+            # Status label
+            status_label = ttk.Label( progress_window, text=f"Processing {len(self.selected_image_files)} images..." )
+            status_label.pack( pady=10 )
+            
+            # Process in background
+            def process_tags():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    # Get all image IDs in a single query
+                    relative_paths = [os.path.relpath( filepath, os.path.dirname( self.current_database_path ) ) 
+                                    for filepath in self.selected_image_files]
+                    
+                    placeholders = ','.join( ['?'] * len( relative_paths ) )
+                    cursor.execute( f"SELECT id, relative_path FROM images WHERE relative_path IN ({placeholders})", 
+                                  relative_paths )
+                    results = cursor.fetchall()
+                    
+                    path_to_id = {row[1]: row[0] for row in results}
+                    image_ids = [path_to_id[rel_path] for rel_path in relative_paths if rel_path in path_to_id]
+                    
+                    if image_ids:
+                        # Apply tag changes
+                        if is_checked:
+                            batch_data = [(image_id, tag_id) for image_id in image_ids]
+                            cursor.executemany( "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?, ?)", 
+                                              batch_data )
+                        else:
+                            batch_data = [(image_id, tag_id) for image_id in image_ids]
+                            cursor.executemany( "DELETE FROM image_tags WHERE image_id = ? AND tag_id = ?", 
+                                              batch_data )
+                        
+                        conn.commit()
+                        
+                        # Invalidate cache
+                        for filepath in self.selected_image_files:
+                            self.invalidate_image_cache( filepath )
+                    
+                    conn.close()
+                    
+                    # Update UI in main thread
+                    self.root.after( 0, lambda: self.finish_async_tag_change( progress_window ) )
+                    
+                except Exception as e:
+                    # Show error in main thread
+                    self.root.after( 0, lambda: self.show_async_error( progress_window, str(e) ) )
+            
+            # Start processing in background
+            import threading
+            thread = threading.Thread( target=process_tags, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            print( f"Error setting up async tag change: {e}" )
+            messagebox.showerror( "Error", f"Failed to set up async tag change: {str(e)}" )
+            
+    def finish_async_tag_change( self, progress_window ):
+        """Finish the async tag change operation"""
+        progress_window.destroy()
+        # Only refresh filtered images for large selections
+        self.refresh_filtered_images()
+        messagebox.showinfo( "Success", "Tag changes applied successfully!" )
+        
+    def show_async_error( self, progress_window, error_msg ):
+        """Show error from async operation"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to apply tag changes: {error_msg}" )
             
     def on_rating_scale_click( self, event ):
         """Handle mouse click on rating scale to jump to position"""
@@ -3409,22 +3558,44 @@ class ImageViewer:
         if self.image_rating_scale['state'] == 'disabled':
             return
             
+        # Check if we have a large selection that might cause freezing
+        if len( self.selected_image_files ) > 50:
+            # For large selections, show a warning and ask for confirmation
+            response = messagebox.askyesno( 
+                "Large Selection Warning", 
+                f"You have {len(self.selected_image_files)} images selected. "
+                "Applying rating changes to this many images may take a while and could temporarily freeze the app. "
+                "Do you want to continue?"
+            )
+            if not response:
+                return
+                
+            # For very large selections, use async processing
+            if len( self.selected_image_files ) > 100:
+                self.root.after( 1, lambda: self.apply_rating_changes_async( self.image_rating_var.get() ) )
+                return
+            
         try:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
             rating = self.image_rating_var.get()
             
-            # Get image IDs and update ratings
-            for filepath in self.selected_image_files:
-                relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
-                cursor.execute( "UPDATE images SET rating = ? WHERE relative_path = ?", (rating, relative_path) )
-                
-                # Invalidate cache entry for this image so it gets fresh data next time
-                if filepath in self.image_metadata_cache:
-                    del self.image_metadata_cache[filepath]
+            # Optimize: Update all images in a single query instead of one per file
+            relative_paths = [os.path.relpath( filepath, os.path.dirname( self.current_database_path ) ) 
+                            for filepath in self.selected_image_files]
+            
+            # Use a single query with IN clause for better performance
+            placeholders = ','.join( ['?'] * len( relative_paths ) )
+            cursor.execute( f"UPDATE images SET rating = ? WHERE relative_path IN ({placeholders})", 
+                          [rating] + relative_paths )
             
             conn.commit()
+            
+            # Invalidate cache for all affected images
+            for filepath in self.selected_image_files:
+                if filepath in self.image_metadata_cache:
+                    del self.image_metadata_cache[filepath]
             
             # Only refresh if rating filters are actually active, otherwise skip refresh entirely
             min_rating = self.min_rating_var.get()
@@ -3443,8 +3614,85 @@ class ImageViewer:
             
         except Exception as e:
             print( f"Error updating image rating: {e}" )
+            messagebox.showerror( "Error", f"Failed to update image ratings: {str(e)}" )
         finally:
             conn.close()
+            
+    def apply_rating_changes_async( self, rating ):
+        """Apply rating changes asynchronously for very large selections to prevent freezing"""
+        try:
+            # Show progress dialog
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Applying Rating Changes" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 50, self.root.winfo_rooty() + 50) )
+            
+            # Progress label
+            progress_label = ttk.Label( progress_window, text="Applying rating changes to images..." )
+            progress_label.pack( pady=20 )
+            
+            # Progress bar
+            progress_bar = ttk.Progressbar( progress_window, mode='indeterminate' )
+            progress_bar.pack( fill=tk.X, padx=20, pady=10 )
+            progress_bar.start()
+            
+            # Status label
+            status_label = ttk.Label( progress_window, text=f"Processing {len(self.selected_image_files)} images..." )
+            status_label.pack( pady=10 )
+            
+            # Process in background
+            def process_ratings():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    # Update all images in a single query
+                    relative_paths = [os.path.relpath( filepath, os.path.dirname( self.current_database_path ) ) 
+                                    for filepath in self.selected_image_files]
+                    
+                    placeholders = ','.join( ['?'] * len( relative_paths ) )
+                    cursor.execute( f"UPDATE images SET rating = ? WHERE relative_path IN ({placeholders})", 
+                                  [rating] + relative_paths )
+                    
+                    conn.commit()
+                    conn.close()
+                    
+                    # Invalidate cache for all affected images
+                    for filepath in self.selected_image_files:
+                        if filepath in self.image_metadata_cache:
+                            del self.image_metadata_cache[filepath]
+                    
+                    # Update UI in main thread
+                    self.root.after( 0, lambda: self.finish_async_rating_change( progress_window ) )
+                    
+                except Exception as e:
+                    # Show error in main thread
+                    self.root.after( 0, lambda: self.show_async_rating_error( progress_window, str(e) ) )
+            
+            # Start processing in background
+            import threading
+            thread = threading.Thread( target=process_ratings, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            print( f"Error setting up async rating change: {e}" )
+            messagebox.showerror( "Error", f"Failed to set up async rating change: {str(e)}" )
+            
+    def finish_async_rating_change( self, progress_window ):
+        """Finish the async rating change operation"""
+        progress_window.destroy()
+        # Only refresh filtered images for large selections
+        self.refresh_filtered_images()
+        messagebox.showinfo( "Success", "Rating changes applied successfully!" )
+        
+    def show_async_rating_error( self, progress_window, error_msg ):
+        """Show error from async rating operation"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to apply rating changes: {error_msg}" )
     
     def apply_image_tag_changes( self ):
         """Apply new tags to selected images (rating changes are now immediate)"""
