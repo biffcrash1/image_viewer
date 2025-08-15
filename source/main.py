@@ -41,15 +41,27 @@ class TreeviewImageList:
         self.thumbnail_load_queue = deque()
         self.thumbnail_loading = False
         self.max_cache_size = 500
-        self.thumbnail_size = (64, 64)
+        
+        # Priority-based thumbnail loading for TreeviewImageList
+        self.priority_thumbnail_queue = []  # List of (priority, filepath, item_id) tuples
+        self.visible_item_range = (0, 0)  # Track visible item range
+        self.last_visible_center = -1  # Track scroll jumps
+        self.thumbnail_size = (48, 48)  # Smaller to fit better in treeview rows
+        self.cached_visible_items = []  # Cache visible items to avoid repeated bbox calls
+        self.last_visible_update = 0  # Track when visible items were last updated
+        self._processing_priority = False  # Flag to track if priority processing is active
+        self._verifying_thumbnails = False  # Flag to prevent multiple simultaneous verifications
         
         # Debouncing for thumbnail loading
-        self.thumbnail_load_delay = 200  # ms delay before loading
+        self.thumbnail_load_delay = 50  # ms delay before loading (reduced from 200)
         self.pending_thumbnail_loads = {}  # {item_id: after_id}
         self.last_scroll_time = 0
         
         # Create UI components
         self.setup_ui()
+        
+        # Start periodic verification for visible thumbnails
+        self.start_periodic_verification()
         
     def setup_ui( self ):
         """Setup the treeview-based list UI"""
@@ -64,13 +76,17 @@ class TreeviewImageList:
         self.treeview = ttk.Treeview( self.frame, style="ImageList.Treeview", show='tree', selectmode='extended' )
         self.treeview.heading( '#0', text='Images', anchor='w' )
         
-        # Scrollbar
-        scrollbar = ttk.Scrollbar( self.frame, orient="vertical", command=self.treeview.yview )
+        # Scrollbar - use tk.Scrollbar with explicit width and styling for normal width
+        # Create a frame to hold the scrollbar and ensure it takes up space
+        scrollbar_frame = tk.Frame( self.frame, width=25, bg='lightgray' )
+        scrollbar_frame.pack_propagate( False )  # Don't shrink to contents
+        scrollbar = tk.Scrollbar( scrollbar_frame, orient="vertical", command=self.treeview.yview, width=25, bg='lightgray', troughcolor='white' )
         self.treeview.configure( yscrollcommand=scrollbar.set )
         
         # Pack components
         self.treeview.pack( side="left", fill="both", expand=True )
-        scrollbar.pack( side="right", fill="y" )
+        scrollbar_frame.pack( side="right", fill="y" )
+        scrollbar.pack( fill="both", expand=True )
         
         # Bind events
         self.treeview.bind( "<<TreeviewSelect>>", self.on_selection_changed )
@@ -88,6 +104,10 @@ class TreeviewImageList:
         self.selected_indices.clear()
         self.refresh_treeview()
         
+        # Update status if main app is available
+        if self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+            self.main_app.update_image_list_status()
+        
     def filter_items( self, filter_func=None ):
         """Filter items based on a function"""
         if filter_func:
@@ -97,6 +117,10 @@ class TreeviewImageList:
         
         self.selected_indices.clear()
         self.refresh_treeview()
+        
+        # Update status if main app is available
+        if self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+            self.main_app.update_image_list_status()
         
     def refresh_treeview( self ):
         """Refresh the treeview with current filtered items"""
@@ -114,15 +138,57 @@ class TreeviewImageList:
             item_id = str( i )
             self.treeview.insert( '', 'end', iid=item_id, text=filename )
             
-            # Queue thumbnail loading if enabled and filepath exists
+            # Only set cached thumbnails immediately, don't queue all items
             if show_thumbnails and filepath and os.path.exists( filepath ):
                 # Check if thumbnail is already cached
                 if filepath in self._thumbnail_cache:
                     # Use cached thumbnail immediately
-                    self.treeview.item( item_id, image=self._thumbnail_cache[filepath] )
-                else:
-                    # Queue for lazy loading
-                    self.queue_thumbnail_load( filepath, item_id )
+                    try:
+                        self.treeview.item( item_id, image=self._thumbnail_cache[filepath] )
+
+                    except Exception as e:
+                        print( f"CACHED: Error applying cached thumbnail for {item_id}: {e}" )
+        
+        # After adding all items, load thumbnails for visible items only
+        if any( item_data.get( 'show_thumbnails', False ) for item_data in self.filtered_items ):
+            self.parent.after( 100, self.load_initial_visible_thumbnails )
+    
+    def load_initial_visible_thumbnails( self ):
+        """Load thumbnails for initially visible items and preload adjacent ones"""
+        try:
+            # Get actually visible items
+            visible_items = self.get_visible_treeview_items()
+            
+            if visible_items:
+                visible_indices = [int(item) for item in visible_items if item.isdigit()]
+                
+                if visible_indices:
+                    visible_start = min( visible_indices )
+                    visible_end = max( visible_indices )
+                    
+                    # Define preload range for initial load
+                    preload_range = 20
+                    load_start = max( 0, visible_start - preload_range )
+                    load_end = min( len( self.filtered_items ) - 1, visible_end + preload_range )
+                    
+                    # Queue thumbnails for visible + preload range
+                    for index in range( load_start, load_end + 1 ):
+                        if index < len( self.filtered_items ):
+                            item_data = self.filtered_items[index]
+                            filepath = item_data.get( 'filepath' )
+                            show_thumbnails = item_data.get( 'show_thumbnails', False )
+                            item_id = str( index )
+                            
+                            if show_thumbnails and filepath and os.path.exists( filepath ):
+                                if filepath not in self._thumbnail_cache:
+                                    # Queue for priority loading
+                                    self.queue_thumbnail_load( filepath, item_id )
+                                
+        except Exception as e:
+            print( f"Error loading initial visible thumbnails: {e}" )
+        
+        # Verify all visible items are covered after initial load
+        self.parent.after( 300, self.verify_visible_thumbnails_loaded )
             
     def on_selection_changed( self, event ):
         """Handle treeview selection changes"""
@@ -230,7 +296,7 @@ class TreeviewImageList:
             del self._thumbnail_cache[key]
             
     def queue_thumbnail_load( self, filepath, item_id ):
-        """Queue a thumbnail for lazy loading with debouncing"""
+        """Queue a thumbnail for lazy loading with priority"""
         if not filepath or not os.path.exists( filepath ):
             return
             
@@ -238,10 +304,190 @@ class TreeviewImageList:
         if item_id in self.pending_thumbnail_loads:
             self.parent.after_cancel( self.pending_thumbnail_loads[item_id] )
             
-        # Schedule thumbnail load after delay
+        # Calculate priority for this item
+        priority = self.calculate_treeview_thumbnail_priority( item_id )
+        
+        # Add to priority queue
+        import heapq
+        heapq.heappush( self.priority_thumbnail_queue, (priority, filepath, item_id) )
+        
+        # Schedule thumbnail load after delay (but use priority queue)
         after_id = self.parent.after( self.thumbnail_load_delay, 
-                                     lambda: self._delayed_thumbnail_load( filepath, item_id ) )
+                                     lambda: self._process_priority_thumbnail_load() )
         self.pending_thumbnail_loads[item_id] = after_id
+        
+    def calculate_treeview_thumbnail_priority( self, item_id ):
+        """Calculate priority for treeview thumbnail loading"""
+        try:
+            # Use cached visible items if recent, otherwise update
+            import time
+            current_time = time.time() * 1000  # Convert to milliseconds
+            
+            if not self.cached_visible_items or (current_time - self.last_visible_update > 100):
+                self.cached_visible_items = self.get_visible_treeview_items()
+                self.last_visible_update = current_time
+            
+            visible_items = self.cached_visible_items
+            
+            if visible_items:
+                visible_indices = [int(item) for item in visible_items if item.isdigit()]
+                
+                if visible_indices:
+                    visible_start = min( visible_indices )
+                    visible_end = max( visible_indices )
+                    visible_center = (visible_start + visible_end) // 2
+                    
+                    # Update visible range tracking
+                    self.update_treeview_visible_range( visible_start, visible_end )
+                    
+                    if item_id.isdigit():
+                        item_index = int( item_id )
+                        
+                        if visible_start <= item_index <= visible_end:
+                            # Visible items get highest priority (0-50 based on distance from center)
+                            distance_from_center = abs( item_index - visible_center )
+                            return distance_from_center
+                        else:
+                            # Adjacent items get medium priority for preloading
+                            preload_range = 20
+                            if (visible_start - preload_range) <= item_index < visible_start:
+                                # Items above visible range
+                                distance = visible_start - item_index
+                                return 100 + distance
+                            elif visible_end < item_index <= (visible_end + preload_range):
+                                # Items below visible range  
+                                distance = item_index - visible_end
+                                return 100 + distance
+                            else:
+                                # Non-adjacent items get very low priority
+                                return 999
+            
+            return 999  # Default low priority for non-visible items
+        except Exception as e:
+            return 999  # Fallback priority
+            
+    def get_visible_treeview_items( self ):
+        """Get only the items that are actually visible in the treeview viewport"""
+        try:
+            # Get the bounding box of the visible area
+            visible_items = []
+            
+            # Get all items
+            all_items = self.treeview.get_children()
+            
+            # Check which ones are actually visible
+            for item in all_items:
+                try:
+                    # Get the bounding box of the item
+                    bbox = self.treeview.bbox( item )
+                    if bbox:  # bbox is None if item is not visible
+                        visible_items.append( item )
+                except:
+                    # If bbox fails, item is not visible
+                    continue
+                    
+            return visible_items
+        except Exception as e:
+            print( f"Error getting visible items: {e}" )
+            return []
+            
+    def update_treeview_visible_range( self, start_index, end_index ):
+        """Update visible range and detect scroll jumps for treeview"""
+        old_start, old_end = self.visible_item_range
+        self.visible_item_range = (start_index, end_index)
+        
+        new_center = (start_index + end_index) // 2
+        
+        # Clear queue on major scroll jumps
+        if self.last_visible_center != -1:
+            center_jump = abs( new_center - self.last_visible_center )
+            if center_jump > 20:  # Smaller threshold for treeview
+                self.priority_thumbnail_queue.clear()
+                
+        self.last_visible_center = new_center
+        
+    def _process_priority_thumbnail_load( self ):
+        """Process priority-based thumbnail loading"""
+        if not self.priority_thumbnail_queue:
+            self._processing_priority = False
+            if not self.thumbnail_loading:
+                self.process_thumbnail_queue()  # Fallback to old queue
+            return
+            
+        # Get highest priority thumbnail and process it directly
+        import heapq
+        priority, filepath, item_id = heapq.heappop( self.priority_thumbnail_queue )
+        
+        # Skip items with very low priority (non-adjacent items)
+        if priority >= 999:
+            # Continue processing if there are more items
+            if self.priority_thumbnail_queue:
+                self.parent.after( 50, self._process_priority_thumbnail_load )
+            return
+        
+        # Set processing flag
+        self._processing_priority = True
+        
+        # Process this thumbnail directly - allow multiple visible thumbnails to load in parallel
+        self._load_thumbnail_directly( filepath, item_id )
+        
+        # Continue processing more items with different speeds based on priority
+        if self.priority_thumbnail_queue:
+            if priority < 50:  # Visible items
+                self.parent.after( 1, self._process_priority_thumbnail_load )
+            elif priority < 150:  # Preload items
+                self.parent.after( 10, self._process_priority_thumbnail_load )
+            else:
+                self.parent.after( 50, self._process_priority_thumbnail_load )
+            
+    def _load_thumbnail_directly( self, filepath, item_id ):
+        """Load a thumbnail directly, bypassing the FIFO queue"""
+        # Don't set thumbnail_loading flag to allow parallel loading of visible items
+        
+        def load_thumbnail_async():
+            """Load thumbnail in background thread"""
+            try:
+                # Check if item still exists
+                if not self.treeview.exists( item_id ):
+                    return
+                    
+                # Check cache first
+                if filepath in self._thumbnail_cache:
+                    photo = self._thumbnail_cache[filepath]
+                else:
+                    # Load thumbnail
+                    photo = self.load_thumbnail( filepath )
+                    
+                if photo:
+                    # Update UI on main thread
+                    def update_ui():
+                        try:
+                            if self.treeview.exists( item_id ):
+                                # Get current text to preserve it
+                                current_text = self.treeview.item( item_id, 'text' )
+                                # Set both image and text (image appears before text in treeview)
+                                self.treeview.item( item_id, image=photo, text=current_text )
+
+                                
+                                # Force treeview to refresh this item
+                                self.treeview.update_idletasks()
+                            else:
+                                print( f"THUMBNAIL: Item {item_id} no longer exists when trying to set thumbnail" )
+                        except Exception as e:
+                            print( f"THUMBNAIL: Error setting thumbnail for item {item_id}: {e}" )
+                    self.parent.after( 0, update_ui )
+                    
+            except Exception as e:
+                print( f"Error loading priority thumbnail for {filepath}: {e}" )
+                
+        # Load thumbnail in background thread
+        threading.Thread( target=load_thumbnail_async, daemon=True ).start()
+        
+    def _continue_priority_processing( self ):
+        """Continue processing the priority queue"""
+        self.thumbnail_loading = False
+        if self.priority_thumbnail_queue:
+            self._process_priority_thumbnail_load()
         
     def _delayed_thumbnail_load( self, filepath, item_id ):
         """Actually load the thumbnail after the delay"""
@@ -251,9 +497,13 @@ class TreeviewImageList:
             
         # Only load if item still exists and is visible
         if self.treeview.exists( item_id ):
-            self.thumbnail_load_queue.append( (filepath, item_id) )
+            # Use priority system instead of FIFO queue
+            priority = self.calculate_treeview_thumbnail_priority( item_id )
+            import heapq
+            heapq.heappush( self.priority_thumbnail_queue, (priority, filepath, item_id) )
+            
             if not self.thumbnail_loading:
-                self.process_thumbnail_queue()
+                self._process_priority_thumbnail_load()
                 
     def process_thumbnail_queue( self ):
         """Process thumbnail loading queue in background"""
@@ -337,11 +587,18 @@ class TreeviewImageList:
         import time
         self.last_scroll_time = time.time()
         
+        # Invalidate cached visible items on scroll
+        self.cached_visible_items = []
+        self.last_visible_update = 0
+        
         # Cancel all pending thumbnail loads during scrolling
         self.cancel_pending_thumbnail_loads()
         
+        # Clear priority queue to avoid loading thumbnails for old positions
+        self.priority_thumbnail_queue.clear()
+        
         # Schedule thumbnail loading check after scroll stops
-        self.parent.after( self.thumbnail_load_delay + 50, self.check_scroll_stopped )
+        self.parent.after( self.thumbnail_load_delay + 25, self.check_scroll_stopped )
         
     def on_scroll_release( self, event ):
         """Handle scrollbar release"""
@@ -361,11 +618,59 @@ class TreeviewImageList:
         # If no recent scroll activity, load visible thumbnails
         if current_time - self.last_scroll_time >= (self.thumbnail_load_delay / 1000.0):
             self.load_visible_thumbnails_debounced()
+            # Also schedule verification to catch any missed items
+            self.parent.after( 400, self.verify_visible_thumbnails_loaded )
             
     def load_visible_thumbnails_debounced( self ):
-        """Load thumbnails for visible items with debouncing"""
+        """Load thumbnails for visible items and preload adjacent items"""
         try:
-            visible_items = self.treeview.get_children()
+            # Get actually visible items
+            visible_items = self.get_visible_treeview_items()
+            
+            if visible_items:
+                visible_indices = [int(item) for item in visible_items if item.isdigit()]
+                
+                if visible_indices:
+                    visible_start = min( visible_indices )
+                    visible_end = max( visible_indices )
+                    
+                    # Define preload range
+                    preload_range = 20
+                    load_start = max( 0, visible_start - preload_range )
+                    load_end = min( len( self.filtered_items ) - 1, visible_end + preload_range )
+                    
+                    # Queue thumbnails for visible + preload range
+                    for index in range( load_start, load_end + 1 ):
+                        if index < len( self.filtered_items ):
+                            item_data = self.filtered_items[index]
+                            filepath = item_data.get( 'filepath' )
+                            show_thumbnails = item_data.get( 'show_thumbnails', False )
+                            item_id = str( index )
+                            
+                            if show_thumbnails and filepath and os.path.exists( filepath ):
+                                if filepath not in self._thumbnail_cache:
+                                    # Queue with priority based on visibility/distance
+                                    self.queue_thumbnail_load( filepath, item_id )
+                                
+        except Exception as e:
+            print( f"Error loading visible thumbnails (debounced): {e}" )
+        
+        # After initial loading, verify all visible items are covered
+        self.parent.after( 200, self.verify_visible_thumbnails_loaded )
+    
+    def verify_visible_thumbnails_loaded( self ):
+        """Verify all visible thumbnails are loaded or queued, re-queue any missing ones"""
+        # Prevent multiple simultaneous verifications
+        if self._verifying_thumbnails:
+            return
+        self._verifying_thumbnails = True
+        
+        try:
+            visible_items = self.get_visible_treeview_items()
+            missing_count = 0
+            total_visible = 0
+            loaded_count = 0
+            pending_count = 0
             
             for item_id in visible_items:
                 if item_id.isdigit():
@@ -376,455 +681,99 @@ class TreeviewImageList:
                         show_thumbnails = item_data.get( 'show_thumbnails', False )
                         
                         if show_thumbnails and filepath and os.path.exists( filepath ):
-                            if filepath not in self._thumbnail_cache:
-                                # Use debounced loading
-                                self.queue_thumbnail_load( filepath, item_id )
+                            total_visible += 1
+                            
+                            # Check if thumbnail is actually DISPLAYED in treeview (not just cached)
+                            is_displayed = False
+                            try:
+                                # Check if treeview item has an image set
+                                item_info = self.treeview.item( item_id )
+                                is_displayed = bool( item_info.get( 'image' ) )
+                            except:
+                                is_displayed = False
+                                
+                            is_pending = item_id in self.pending_thumbnail_loads
+                            is_queued = any( item_id == queued_id for _, _, queued_id in self.priority_thumbnail_queue )
+                            
+                            if is_displayed:
+                                loaded_count += 1
+                            elif is_pending or is_queued:
+                                pending_count += 1
+                            else:
+                                # Missing or not displayed - re-queue with priority 0
+                                missing_count += 1
+                                import heapq
+                                heapq.heappush( self.priority_thumbnail_queue, (0, filepath, item_id) )
+                                
+                                # Also trigger immediate processing if not already running
+                                if not hasattr( self, '_processing_priority' ) or not self._processing_priority:
+                                    self._processing_priority = True
+                                    self.parent.after( 1, self._process_priority_thumbnail_load )
+                                print( f"Re-queuing missing visible thumbnail for item {item_id} (path: {os.path.basename(filepath)})" )
+            
+            # Always print status for debugging
+            print( f"Visible thumbnail status: {loaded_count} loaded, {pending_count} pending, {missing_count} missing, {total_visible} total" )
+            
+            if missing_count > 0:
+                print( f"Found {missing_count} missing visible thumbnails, re-queued them" )
+                # Schedule another verification in case more are missed
+                self.parent.after( 200, self.verify_visible_thumbnails_loaded )
+            elif pending_count > 0:
+                # Still have pending items, check again soon
+                self.parent.after( 500, self.verify_visible_thumbnails_loaded )
                                 
         except Exception as e:
-            print( f"Error loading visible thumbnails (debounced): {e}" )
-
-class VirtualScrolledImageList:
-    """Virtual scrolling implementation for large image lists"""
+            print( f"Error verifying visible thumbnails: {e}" )
+        finally:
+            # Reset verification flag
+            self._verifying_thumbnails = False
     
-    def __init__( self, parent, item_height=50, visible_buffer=5 ):
-        self.parent = parent
-        self.item_height = item_height
-        self.visible_buffer = visible_buffer
-        
-        # Reference to main application for thumbnail generation
-        self.main_app = None
-        
-        # Data storage
-        self.items = []
-        self.filtered_items = []
-        self.rendered_items = {}  # Currently rendered widgets {index: widget_data}
-        
-        # Viewport tracking
-        self.viewport_start = 0
-        self.viewport_end = 0
-        self.last_scroll_time = 0
-        
-        # Selection tracking
-        self.selected_indices = set()
-        self.selection_callbacks = []
-        self.last_clicked_index = None  # Track last clicked item for SHIFT selection
-        
-        # Thumbnail caching
-        self.thumbnail_cache = {}
-        self.thumbnail_load_queue = deque()
-        self.thumbnail_loading = False
-        self.max_cache_size = 500
-        
-        # Create UI components
-        self.setup_ui()
-        
-    def setup_ui( self ):
-        """Setup the virtual scrolled list UI"""
-        # Main frame
-        self.frame = ttk.Frame( self.parent )
-        self.frame.focus_set()  # Allow frame to receive focus for mouse wheel events
-        
-        # Canvas for scrolling
-        self.canvas = tk.Canvas( self.frame, highlightthickness=0 )
-        self.scrollbar = ttk.Scrollbar( self.frame, orient="vertical", command=self.on_scroll )
-        self.canvas.configure( yscrollcommand=self.scrollbar.set )
-        
-        # Scrollable frame inside canvas
-        self.scrollable_frame = tk.Frame( self.canvas, bg='white' )
-        self.canvas_window = self.canvas.create_window( 0, 0, anchor="nw", window=self.scrollable_frame )
-        
-        # Pack components
-        self.canvas.pack( side="left", fill="both", expand=True )
-        self.scrollbar.pack( side="right", fill="y" )
-        
-        # Bind mouse wheel to main frame as well
-        self.frame.bind( "<MouseWheel>", self.on_mousewheel )
-        
-        # Bind events
-        self.canvas.bind( "<Configure>", self.on_canvas_configure )
-        self.canvas.bind( "<MouseWheel>", self.on_mousewheel )
-        self.scrollable_frame.bind( "<Configure>", self.on_frame_configure )
-        self.scrollable_frame.bind( "<MouseWheel>", self.on_mousewheel )
-        
-        # Start update loop
-        self.schedule_update()
-        
-    def set_items( self, items ):
-        """Set the list of items to display"""
-        self.items = items
-        self.filtered_items = items[:]
-        self.selected_indices.clear()
-
-        self.update_scroll_region()
-        self.update_viewport()
-        
-    def filter_items( self, filter_func=None ):
-        """Filter items based on a function"""
-        if filter_func:
-            self.filtered_items = [item for item in self.items if filter_func(item)]
-        else:
-            self.filtered_items = self.items[:]
-        
-        self.selected_indices.clear()
-        self.update_scroll_region()
-        self.update_viewport()
-        
-    def update_scroll_region( self ):
-        """Update the scrollable region size"""
-        total_height = len( self.filtered_items ) * self.item_height
-        self.canvas.configure( scrollregion=(0, 0, 0, total_height) )
-        
-        # Set the scrollable frame height to match the total content height
-        self.scrollable_frame.configure( height=total_height )
-        
-
-        
-        # Force canvas to update its internal state
-        self.canvas.update_idletasks()
-        
-    def on_canvas_configure( self, event ):
-        """Handle canvas resize"""
-        canvas_width = event.width
-        self.canvas.itemconfig( self.canvas_window, width=canvas_width )
-        self.update_viewport()
-        
-    def on_frame_configure( self, event ):
-        """Handle frame resize"""
-        # Use the calculated total height instead of bbox for more reliable scrolling
-        total_height = len( self.filtered_items ) * self.item_height
-        self.canvas.configure( scrollregion=(0, 0, 0, total_height) )
-        
-    def on_scroll( self, *args ):
-        """Handle scrollbar movement"""
-        self.canvas.yview( *args )
-        self.last_scroll_time = time.time()
-        self.update_viewport()
-        
-    def on_mousewheel( self, event ):
-        """Handle mouse wheel scrolling"""
-        self.canvas.yview_scroll( int(-1 * (event.delta / 120)), "units" )
-        self.last_scroll_time = time.time()
-        self.update_viewport()
-        
-    def update_viewport( self ):
-        """Update which items should be visible in the viewport"""
-        if not self.filtered_items:
-            return
-            
-        canvas_height = self.canvas.winfo_height()
-        if canvas_height <= 1:
-            # Canvas not yet properly sized, use default height and retry later
-            canvas_height = 400  # Default height for initial calculation
-            self.parent.after( 100, self.update_viewport )  # Retry after canvas is sized
-            return
-            
-        # More robust approach: use both yview and canvasy for cross-validation
+    def start_periodic_verification( self ):
+        """Start periodic verification of visible thumbnails"""
+        self.periodic_verification()
+    
+    def periodic_verification( self ):
+        """Periodically verify visible thumbnails are loaded"""
         try:
-            # Method 1: Using scrollbar fractions
-            scroll_top_fraction, scroll_bottom_fraction = self.canvas.yview()
-            total_height = len( self.filtered_items ) * self.item_height
-            scroll_top_method1 = scroll_top_fraction * total_height
-            
-            # Method 2: Using canvas coordinates (original method)
-            scroll_top_method2 = self.canvas.canvasy( 0 )
-            
-            # Use the method that gives more reasonable results
-            # If they're very different, prefer method 1 (scrollbar fractions)
-            if abs( scroll_top_method1 - scroll_top_method2 ) > self.item_height * 2:
-                scroll_top = scroll_top_method1
-            else:
-                scroll_top = scroll_top_method2
+            # Only run periodic verification if we have items and thumbnails are enabled
+            if (self.filtered_items and 
+                any( item_data.get( 'show_thumbnails', False ) for item_data in self.filtered_items )):
                 
-            scroll_bottom = scroll_top + canvas_height
-            
+                visible_items = self.get_visible_treeview_items()
+                if visible_items:
+                    # Check if any visible items are missing thumbnails
+                    missing_any = False
+                    for item_id in visible_items:
+                        if item_id.isdigit():
+                            index = int( item_id )
+                            if index < len( self.filtered_items ):
+                                item_data = self.filtered_items[index]
+                                filepath = item_data.get( 'filepath' )
+                                show_thumbnails = item_data.get( 'show_thumbnails', False )
+                                
+                                if show_thumbnails and filepath and os.path.exists( filepath ):
+                                    # Check if thumbnail is actually displayed
+                                    is_displayed = False
+                                    try:
+                                        item_info = self.treeview.item( item_id )
+                                        is_displayed = bool( item_info.get( 'image' ) )
+                                    except:
+                                        is_displayed = False
+                                    
+                                    if not is_displayed and item_id not in self.pending_thumbnail_loads:
+                                        missing_any = True
+                                        break
+                    
+                    # If missing any, run full verification
+                    if missing_any:
+                        self.verify_visible_thumbnails_loaded()
+        
         except Exception as e:
-            # Ultimate fallback
-            scroll_top = 0
-            scroll_bottom = canvas_height
-            
-        # Calculate visible range with buffer
-        start_index = max( 0, int(scroll_top / self.item_height) - self.visible_buffer )
-        end_index = min( len(self.filtered_items), 
-                        int(scroll_bottom / self.item_height) + self.visible_buffer + 1 )
+            print( f"Error in periodic verification: {e}" )
         
-        # Ensure we don't have negative or invalid ranges
-        start_index = max( 0, start_index )
-        end_index = max( start_index, min( len(self.filtered_items), end_index ) )
-        
+        # Schedule next periodic check
+        self.parent.after( 2000, self.periodic_verification )  # Every 2 seconds
 
-        
-
-        
-        if start_index != self.viewport_start or end_index != self.viewport_end:
-            self.viewport_start = start_index
-            self.viewport_end = end_index
-            self.render_visible_items()
-            
-    def render_visible_items( self ):
-        """Render only the items that should be visible"""
-        # Remove items outside viewport
-        to_remove = []
-        for index in self.rendered_items:
-            if index < self.viewport_start or index >= self.viewport_end:
-                to_remove.append( index )
-                
-        for index in to_remove:
-            self.remove_rendered_item( index )
-            
-        # Add items in viewport
-        items_added = 0
-        items_to_add = []
-        for index in range( self.viewport_start, self.viewport_end ):
-            if index not in self.rendered_items and index < len( self.filtered_items ):
-                items_to_add.append( index )
-                self.render_item( index )
-                items_added += 1
-                
-
-                
-
-                
-    def render_item( self, index ):
-        """Render a single item at the given index"""
-        if index >= len( self.filtered_items ):
-            return
-            
-        item_data = self.filtered_items[index]
-        
-
-        
-        # Create item frame - use tk.Frame instead of ttk.Frame for better visibility
-        item_frame = tk.Frame( self.scrollable_frame, bg='white', relief='flat', bd=1 )
-        y_position = index * self.item_height
-        
-        # Get the actual canvas width for proper sizing
-        try:
-            canvas_width = self.canvas.winfo_width()
-            if canvas_width <= 1:
-                canvas_width = 400  # Default fallback
-        except:
-            canvas_width = 400
-            
-        # Back to simple absolute positioning - let's see what the actual limit is
-        item_frame.place( x=0, y=y_position, width=canvas_width-20, height=self.item_height )
-        
-        # Debug coordinate limits
-        if index > 480 and index < 490:
-            print( f"COORD TEST: Item {index} at y={y_position}" )
-        
-        # Create content frame
-        bg_color = 'lightblue' if index in self.selected_indices else 'white'
-        content_frame = tk.Frame( item_frame, bg=bg_color, relief='flat' )
-        content_frame.pack( fill="both", expand=True, padx=5, pady=2 )
-        
-        # Thumbnail placeholder
-        thumb_label = None
-        thumb_frame = None
-        if item_data.get( 'show_thumbnails', False ) and item_data.get( 'filepath' ):
-            # Create a frame with exact pixel dimensions for 64x64 thumbnails
-            thumb_frame = tk.Frame( content_frame, width=64, height=64, bg=bg_color )
-            thumb_frame.pack( side="left", padx=(0, 5) )
-            thumb_frame.pack_propagate( False )  # Prevent frame from shrinking
-            
-            # Create label to fill the frame
-            thumb_label = tk.Label( thumb_frame, text="", bg=bg_color )
-            thumb_label.pack( fill="both", expand=True )
-            
-            # Queue thumbnail loading
-            self.queue_thumbnail( item_data['filepath'], thumb_label, index )
-            
-        # Filename label
-        filename = item_data.get( 'filename', 'Unknown' )
-        text_label = tk.Label( content_frame, text=filename, anchor="w", bg=bg_color )
-        text_label.pack( side="left", fill="x", expand=True )
-        
-        # Store rendered item data
-        self.rendered_items[index] = {
-            'frame': item_frame,
-            'content_frame': content_frame,
-            'thumb_label': thumb_label,
-            'thumb_frame': thumb_frame,
-            'text_label': text_label,
-            'data': item_data
-        }
-        
-        # Bind click events
-        def on_click( event, idx=index ):
-            self.on_item_click( idx, event )
-            
-        def on_double_click( event, idx=index ):
-            self.on_item_double_click( idx, event )
-            
-        # Bind mouse wheel scrolling to all widgets
-        def on_mousewheel( event ):
-            self.on_mousewheel( event )
-            
-        item_frame.bind( "<Button-1>", on_click )
-        content_frame.bind( "<Button-1>", on_click )
-        text_label.bind( "<Button-1>", on_click )
-        
-        item_frame.bind( "<Double-Button-1>", on_double_click )
-        content_frame.bind( "<Double-Button-1>", on_double_click )
-        text_label.bind( "<Double-Button-1>", on_double_click )
-        
-        # Bind mouse wheel events to all widgets
-        item_frame.bind( "<MouseWheel>", on_mousewheel )
-        content_frame.bind( "<MouseWheel>", on_mousewheel )
-        text_label.bind( "<MouseWheel>", on_mousewheel )
-        
-        if thumb_label:
-            thumb_label.bind( "<Button-1>", on_click )
-            thumb_label.bind( "<Double-Button-1>", on_double_click )
-            thumb_label.bind( "<MouseWheel>", on_mousewheel )
-            
-        if thumb_frame:
-            thumb_frame.bind( "<Button-1>", on_click )
-            thumb_frame.bind( "<Double-Button-1>", on_double_click )
-            thumb_frame.bind( "<MouseWheel>", on_mousewheel )
-            
-    def remove_rendered_item( self, index ):
-        """Remove a rendered item from display"""
-        if index in self.rendered_items:
-            item = self.rendered_items[index]
-            item['frame'].destroy()
-            del self.rendered_items[index]
-            
-    def queue_thumbnail( self, filepath, label, index ):
-        """Queue a thumbnail for loading"""
-        if filepath and os.path.exists( filepath ):
-            self.thumbnail_load_queue.append( (filepath, label, index) )
-            if not self.thumbnail_loading:
-                self.process_thumbnail_queue()
-                
-    def process_thumbnail_queue( self ):
-        """Process thumbnail loading queue in background"""
-        if not self.thumbnail_load_queue:
-            self.thumbnail_loading = False
-            return
-            
-        self.thumbnail_loading = True
-        
-        # Process one thumbnail
-        filepath, label, index = self.thumbnail_load_queue.popleft()
-        
-        def load_thumbnail():
-            try:
-                # Check cache first
-                if filepath in self.thumbnail_cache:
-                    photo = self.thumbnail_cache[filepath]
-                else:
-                    # Use main app's thumbnail method if available
-                    if self.main_app and hasattr( self.main_app, 'get_thumbnail' ):
-                        photo = self.main_app.get_thumbnail( filepath, size=(64, 64) )
-                    else:
-                        # Fallback: Load and create thumbnail
-                        with Image.open( filepath ) as img:
-                            img.thumbnail( (64, 64), Image.Resampling.LANCZOS )
-                            photo = ImageTk.PhotoImage( img )
-                            
-                    if photo:
-                        # Cache thumbnail (with size limit)
-                        if len( self.thumbnail_cache ) >= self.max_cache_size:
-                            oldest_keys = list( self.thumbnail_cache.keys() )[:50]
-                            for key in oldest_keys:
-                                del self.thumbnail_cache[key]
-                        
-                        self.thumbnail_cache[filepath] = photo
-                
-                # Update label on main thread
-                def update_label():
-                    if label.winfo_exists():
-                        label.configure( image=photo, text="" )
-                        label.image = photo
-                        
-                self.parent.after( 0, update_label )
-                
-            except Exception as e:
-                print( f"Error loading thumbnail for {filepath}: {e}" )
-                
-            # Continue processing queue
-            self.parent.after( 10, self.process_thumbnail_queue )
-            
-        # Load thumbnail in background thread
-        threading.Thread( target=load_thumbnail, daemon=True ).start()
-        
-    def on_item_click( self, index, event ):
-        """Handle item click"""
-        # Handle selection with proper CTRL and SHIFT behavior
-        if event.state & 0x4:  # Ctrl key (0x4 is the correct bitmask for Ctrl)
-            # CTRL-click: Toggle individual selection
-            if index in self.selected_indices:
-                self.selected_indices.remove( index )
-            else:
-                self.selected_indices.add( index )
-            # Update last clicked for potential SHIFT operations
-            self.last_clicked_index = index
-            
-        elif event.state & 0x1:  # Shift key (0x1 is the correct bitmask for Shift)
-            # SHIFT-click: Range selection
-            if hasattr( self, 'last_clicked_index' ) and self.last_clicked_index is not None:
-                # Select range from last clicked to current
-                start_idx = min( self.last_clicked_index, index )
-                end_idx = max( self.last_clicked_index, index )
-                
-                # Add all indices in range to selection
-                for i in range( start_idx, end_idx + 1 ):
-                    self.selected_indices.add( i )
-            else:
-                # No previous selection, just select current
-                self.selected_indices.clear()
-                self.selected_indices.add( index )
-                self.last_clicked_index = index
-                
-        else:
-            # Regular click: Clear selection and select only this item
-            self.selected_indices.clear()
-            self.selected_indices.add( index )
-            self.last_clicked_index = index
-            
-        # Update visual selection
-        self.update_selection_display()
-        
-        # Notify callbacks
-        for callback in self.selection_callbacks:
-            callback( list(self.selected_indices) )
-            
-    def on_item_double_click( self, index, event ):
-        """Handle item double click - override in subclass"""
-        pass
-        
-    def update_selection_display( self ):
-        """Update the visual display of selected items"""
-        for index, item in self.rendered_items.items():
-            bg_color = 'lightblue' if index in self.selected_indices else 'white'
-            if item['text_label']:
-                item['text_label'].configure( bg=bg_color )
-            if item['thumb_label']:
-                item['thumb_label'].configure( bg=bg_color )
-            if item['thumb_frame']:
-                item['thumb_frame'].configure( bg=bg_color )
-            if item['content_frame']:
-                item['content_frame'].configure( bg=bg_color )
-                
-    def get_selected_items( self ):
-        """Get currently selected items"""
-        return [self.filtered_items[i] for i in self.selected_indices if i < len(self.filtered_items)]
-        
-    def add_selection_callback( self, callback ):
-        """Add a callback for selection changes"""
-        self.selection_callbacks.append( callback )
-        
-    def schedule_update( self ):
-        """Schedule periodic updates"""
-        current_time = time.time()
-        if current_time - self.last_scroll_time > 0.1:
-            self.update_viewport()
-            
-        # Update status in main app if available
-        if hasattr( self, 'main_app' ) and self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
-            self.main_app.update_image_list_status()
-            
-        self.parent.after( 100, self.schedule_update )
 
 class ImageViewer:
     def __init__( self, root ):
@@ -1308,17 +1257,17 @@ class ImageViewer:
         image_list_frame = ttk.Frame( image_frame )
         image_list_frame.pack( fill=tk.BOTH, expand=True )
         
-        # Create treeview-based image list that handles large datasets properly
-        self.virtual_image_list = TreeviewImageList( image_list_frame, item_height=68 )
-        self.virtual_image_list.frame.pack( fill=tk.BOTH, expand=True )
-        
-        # Add status label below the image list
-        self.image_list_status_label = ttk.Label( image_list_frame, text="0 of 0 images (0 selected)", font=('TkDefaultFont', 9) )
-        self.image_list_status_label.pack( side=tk.BOTTOM, pady=(5, 0) )
+        # Add status label at the top of the image list
+        self.image_list_status_label = ttk.Label( image_list_frame, text="0 total items, 0 selected", font=('TkDefaultFont', 9) )
+        self.image_list_status_label.pack( side=tk.TOP, pady=(0, 5) )
         
         # Add debug button for testing
         debug_button = ttk.Button( image_list_frame, text="Debug Viewport", command=self.debug_virtual_scrolling )
         debug_button.pack( side=tk.BOTTOM, pady=(2, 0) )
+        
+        # Create treeview-based image list that handles large datasets properly
+        self.virtual_image_list = TreeviewImageList( image_list_frame, item_height=68 )
+        self.virtual_image_list.frame.pack( fill=tk.BOTH, expand=True )
         
         # Set reference to main app for thumbnail generation
         self.virtual_image_list.main_app = self
@@ -1349,13 +1298,7 @@ class ImageViewer:
             total_images = len( self.virtual_image_list.filtered_items )
             selected_count = len( self.virtual_image_list.selected_indices )
             
-            # Find the highest selected item number (if any)
-            if self.virtual_image_list.selected_indices:
-                last_selected_item = max( self.virtual_image_list.selected_indices ) + 1  # +1 for human-readable numbering
-                status_text = f"{total_images} images total, {selected_count} selected, item number {last_selected_item} selected"
-            else:
-                status_text = f"{total_images} images total, {selected_count} selected"
-                
+            status_text = f"{total_images} total items, {selected_count} selected"
             self.image_list_status_label.configure( text=status_text )
             
     def debug_virtual_scrolling( self ):
@@ -3051,6 +2994,9 @@ class ImageViewer:
             if self.show_thumbnails.get():
                 self.start_visibility_checking()
             
+            # Update status label to reflect current filter results
+            self.update_image_list_status()
+            
         except Exception as e:
             print( f"Error refreshing filtered images: {e}" )
             
@@ -4224,10 +4170,6 @@ class ImageViewer:
             # Use the TreeviewImageList method to enable/disable thumbnails
             if hasattr( self.virtual_image_list, 'set_thumbnails_enabled' ):
                 self.virtual_image_list.set_thumbnails_enabled( show_thumbs )
-            else:
-                # Fallback for VirtualScrolledImageList compatibility
-                for item in self.virtual_image_list.items:
-                    item['show_thumbnails'] = show_thumbs
             
             # Clear thumbnail cache if disabling thumbnails
             if not show_thumbs:
@@ -4358,7 +4300,7 @@ class ImageViewer:
         if not self.thumbnail_load_queue or not self.show_thumbnails.get():
             self.thumbnail_loading = False
             return
-        
+            
         self.thumbnail_loading = True
         
         # Get the next item to process (prioritize visible items)
@@ -4567,17 +4509,6 @@ class ImageViewer:
                         if index < len( children ):
                             item_id = children[index]
                             self.parent.virtual_image_list.treeview.see( item_id )
-                    # For VirtualScrolledImageList, use canvas scrolling
-                    elif hasattr( self.parent.virtual_image_list, 'canvas' ):
-                        item_y = index * self.parent.virtual_image_list.item_height
-                        canvas = self.parent.virtual_image_list.canvas
-                        canvas_height = canvas.winfo_height()
-                        
-                        # Scroll to center the item
-                        total_height = len( self.parent.virtual_image_list.filtered_items ) * self.parent.virtual_image_list.item_height
-                        if total_height > 0:
-                            scroll_pos = max( 0, min( 1.0, item_y / total_height ) )
-                            canvas.yview_moveto( scroll_pos )
         
         def bind( self, event, callback ):
             """Bind events - for compatibility, but events are handled in the new system"""
