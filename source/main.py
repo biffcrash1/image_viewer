@@ -887,6 +887,8 @@ class ImageViewer:
         database_menu.add_command( label="Create Database Here", command=self.create_database_here )
         database_menu.add_command( label="Open Database", command=self.open_database )
         database_menu.add_command( label="Rescan", command=self.rescan_database )
+        database_menu.add_separator()
+        database_menu.add_command( label="Remove Duplicates from Database", command=self.remove_database_duplicates )
         
         # Options menu
         options_menu = tk.Menu( menubar, tearoff=0 )
@@ -894,6 +896,12 @@ class ImageViewer:
         
         options_menu.add_checkbutton( label="Show Thumbnails", variable=self.show_thumbnails, 
                                     command=self.on_thumbnails_toggle )
+        
+        # Help menu
+        help_menu = tk.Menu( menubar, tearoff=0 )
+        menubar.add_cascade( label="Help", menu=help_menu )
+        
+        help_menu.add_command( label="TODO List", command=self.show_todo_list )
         
     def setup_browse_tab( self ):
         """Setup the Browse tab interface"""
@@ -1123,6 +1131,7 @@ class ImageViewer:
         # Initialize tag editing variables
         self.image_tag_checkboxes = {}  # Dictionary to store tag checkbox variables
         self.selected_image_files = []  # Currently selected files for tag editing
+        self.processing_tag_change = False  # Flag to prevent double-processing
         
         # Existing tags section with scrollable checkboxes
         existing_tags_frame = ttk.LabelFrame( image_tags_frame, text="Existing Tags" )
@@ -2888,6 +2897,196 @@ class ImageViewer:
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to rescan database: {str(e)}" )
             
+    def remove_database_duplicates( self ):
+        """Scan for and remove duplicate database entries pointing to the same file"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+        
+        try:
+            # Create progress dialog
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Scanning for Duplicates" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            progress_window.resizable( False, False )
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100) )
+            
+            # Progress widgets
+            progress_label = ttk.Label( progress_window, text="Scanning database for duplicate entries..." )
+            progress_label.pack( pady=10 )
+            
+            progress_bar = ttk.Progressbar( progress_window, mode='indeterminate' )
+            progress_bar.pack( padx=20, pady=10, fill=tk.X )
+            progress_bar.start()
+            
+            status_label = ttk.Label( progress_window, text="Please wait..." )
+            status_label.pack( pady=5 )
+            
+            # Process in background thread
+            import threading
+            
+            def scan_duplicates():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    # Find duplicates by relative_path
+                    cursor.execute( """
+                        SELECT relative_path, COUNT(*) as count, GROUP_CONCAT(id) as ids
+                        FROM images 
+                        GROUP BY relative_path 
+                        HAVING COUNT(*) > 1
+                        ORDER BY relative_path
+                    """ )
+                    duplicates = cursor.fetchall()
+                    
+                    conn.close()
+                    
+                    # Update UI on main thread
+                    self.root.after( 0, lambda: self.show_duplicate_results( progress_window, duplicates ) )
+                    
+                except Exception as e:
+                    # Show error on main thread
+                    self.root.after( 0, lambda: self.show_duplicate_error( progress_window, str(e) ) )
+            
+            # Start scanning
+            thread = threading.Thread( target=scan_duplicates, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to start duplicate scan: {str(e)}" )
+    
+    def show_duplicate_results( self, progress_window, duplicates ):
+        """Show the results of the duplicate scan"""
+        try:
+            progress_window.destroy()
+            
+            if not duplicates:
+                messagebox.showinfo( "No Duplicates Found", "No duplicate entries were found in the database." )
+                return
+            
+            # Calculate total duplicates to remove (keep the highest ID for each file)
+            total_duplicates = sum( count - 1 for _, count, _ in duplicates )
+            
+            # Show confirmation dialog
+            message = f"Found {len(duplicates)} files with duplicate entries.\n"
+            message += f"Total duplicate entries to remove: {total_duplicates}\n\n"
+            message += "This will keep the most recent entry (highest ID) for each file.\n"
+            message += "No actual image files will be deleted.\n\n"
+            message += "Do you want to remove the duplicate database entries?"
+            
+            if messagebox.askyesno( "Remove Duplicates?", message ):
+                self.delete_duplicate_entries( duplicates )
+        
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to show duplicate results: {str(e)}" )
+    
+    def show_duplicate_error( self, progress_window, error_msg ):
+        """Show error from duplicate scan"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to scan for duplicates: {error_msg}" )
+    
+    def delete_duplicate_entries( self, duplicates ):
+        """Delete the duplicate entries from the database"""
+        try:
+            # Create progress dialog for deletion
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Removing Duplicates" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            progress_window.resizable( False, False )
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100) )
+            
+            # Progress widgets
+            progress_label = ttk.Label( progress_window, text="Removing duplicate entries..." )
+            progress_label.pack( pady=10 )
+            
+            progress_bar = ttk.Progressbar( progress_window, maximum=len(duplicates), value=0 )
+            progress_bar.pack( padx=20, pady=10, fill=tk.X )
+            
+            status_label = ttk.Label( progress_window, text="Processing..." )
+            status_label.pack( pady=5 )
+            
+            # Process deletion in background
+            import threading
+            
+            def delete_duplicates():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    total_deleted = 0
+                    
+                    for i, (relative_path, count, ids_str) in enumerate( duplicates ):
+                        # Parse the IDs and sort them
+                        ids = [int(id_str) for id_str in ids_str.split(',')]
+                        ids.sort()
+                        
+                        # Keep the highest ID, delete the rest
+                        ids_to_delete = ids[:-1]  # All except the last (highest)
+                        
+                        # Delete the duplicate entries and their associated tags
+                        for id_to_delete in ids_to_delete:
+                            # Delete associated image_tags first (foreign key constraint)
+                            cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (id_to_delete,) )
+                            
+                            # Delete the image entry
+                            cursor.execute( "DELETE FROM images WHERE id = ?", (id_to_delete,) )
+                        
+                        total_deleted += len( ids_to_delete )
+                        
+                        # Update progress on main thread
+                        progress = i + 1
+                        self.root.after( 0, lambda p=progress, path=relative_path: self.update_deletion_progress( 
+                            progress_bar, status_label, p, len(duplicates), path ) )
+                    
+                    conn.commit()
+                    conn.close()
+                    
+                    # Show completion on main thread
+                    self.root.after( 0, lambda: self.show_deletion_complete( progress_window, total_deleted ) )
+                    
+                except Exception as e:
+                    # Show error on main thread
+                    self.root.after( 0, lambda: self.show_deletion_error( progress_window, str(e) ) )
+            
+            # Start deletion
+            thread = threading.Thread( target=delete_duplicates, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to start duplicate removal: {str(e)}" )
+    
+    def update_deletion_progress( self, progress_bar, status_label, current, total, current_path ):
+        """Update the deletion progress display"""
+        progress_bar['value'] = current
+        status_label.configure( text=f"Processing {current}/{total}: {os.path.basename(current_path)}" )
+    
+    def show_deletion_complete( self, progress_window, total_deleted ):
+        """Show completion of duplicate deletion"""
+        progress_window.destroy()
+        
+        message = f"Successfully removed {total_deleted} duplicate entries from the database.\n\n"
+        message += "The database view will be refreshed to reflect the changes."
+        
+        messagebox.showinfo( "Duplicates Removed", message )
+        
+        # Refresh the database view
+        self.refresh_database_view()
+        self.refresh_filtered_images()
+    
+    def show_deletion_error( self, progress_window, error_msg ):
+        """Show error from duplicate deletion"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to remove duplicates: {error_msg}" )
+            
     def refresh_database_view( self ):
         """Refresh the database tab view"""
         if not self.current_database_path:
@@ -3204,6 +3403,10 @@ class ImageViewer:
             
     def load_image_tags_for_editing( self ):
         """Load tags for the selected images into the editing interface with lazy loading"""
+        # Don't reload during immediate tag changes - the UI already reflects user intent
+        if self.processing_tag_change:
+            return
+            
         if not self.selected_image_files or not self.current_database_path:
             self.clear_image_tag_interface()
             return
@@ -3334,39 +3537,64 @@ class ImageViewer:
         
     def on_image_partial_checkbox_clicked( self, tag_id ):
         """Handle clicking on a greyed out (partial) checkbox in the image tags interface"""
+        # Prevent double-processing
+        if self.processing_tag_change:
+            return
+            
         if tag_id in self.image_tag_checkboxes and self.image_tag_checkboxes[tag_id]['state'] == 'partial':
             tag_data = self.image_tag_checkboxes[tag_id]
             tag_name = tag_data['name']
             tag_frame = tag_data['frame']
             current_value = tag_data['var'].get()
             
-            # Destroy the old greyed checkbox
-            tag_data['checkbox'].destroy()
-            
-            # Create a new normal checkbox with the current state
-            new_var = tk.BooleanVar( value=current_value )
-            new_checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=new_var,
-                                         command=lambda tid=tag_id: self.on_image_tag_changed( tid ) )
-            new_checkbox.pack( side=tk.LEFT, anchor=tk.W )
-            
-            # Update the stored data
-            self.image_tag_checkboxes[tag_id] = {
-                'var': new_var,
-                'name': tag_name,
-                'checkbox': new_checkbox,
-                'state': 'common' if current_value else 'none',
-                'frame': tag_frame
-            }
-            
-            # Apply the change immediately
-            self.apply_single_tag_change( tag_id, current_value )
+            # Set flag to prevent double-processing
+            self.processing_tag_change = True
+            try:
+                # Destroy the old greyed checkbox
+                tag_data['checkbox'].destroy()
+                
+                # Create a new normal checkbox with the current state
+                new_var = tk.BooleanVar( value=current_value )
+                new_checkbox = tk.Checkbutton( tag_frame, text=tag_name, variable=new_var,
+                                             command=lambda tid=tag_id: self.on_image_tag_changed( tid ) )
+                new_checkbox.pack( side=tk.LEFT, anchor=tk.W )
+                
+                # Update the stored data
+                self.image_tag_checkboxes[tag_id] = {
+                    'var': new_var,
+                    'name': tag_name,
+                    'checkbox': new_checkbox,
+                    'state': 'common' if current_value else 'none',
+                    'frame': tag_frame
+                }
+                
+                # Apply the change immediately
+                self.apply_single_tag_change( tag_id, current_value )
+            finally:
+                # Clear the flag after a delay to allow all refresh operations to complete
+                def clear_partial_flag():
+                    self.processing_tag_change = False
+                self.root.after( 100, clear_partial_flag )
             
     def on_image_tag_changed( self, tag_id ):
         """Handle immediate tag checkbox changes"""
+        # Prevent double-processing
+        if self.processing_tag_change:
+            return
+            
         if tag_id in self.image_tag_checkboxes:
             tag_data = self.image_tag_checkboxes[tag_id]
             is_checked = tag_data['var'].get()
-            self.apply_single_tag_change( tag_id, is_checked )
+            
+            # Set flag to prevent double-processing
+            self.processing_tag_change = True
+            try:
+                self.apply_single_tag_change( tag_id, is_checked )
+            finally:
+                # Clear the flag after a delay to allow all refresh operations to complete
+                def clear_flag():
+                    self.processing_tag_change = False
+                self.root.after( 100, clear_flag )
             
     def apply_single_tag_change( self, tag_id, is_checked ):
         """Apply a single tag change immediately to selected images"""
@@ -3395,7 +3623,8 @@ class ImageViewer:
             cursor = conn.cursor()
             
             # Optimize: Get all image IDs in a single query instead of one per file
-            relative_paths = [os.path.relpath( filepath, os.path.dirname( self.current_database_path ) ) 
+            database_dir = os.path.dirname( self.current_database_path )
+            relative_paths = [os.path.relpath( filepath, database_dir ) 
                             for filepath in self.selected_image_files]
             
             # Use a single query with IN clause for better performance
@@ -3404,8 +3633,12 @@ class ImageViewer:
                           relative_paths )
             results = cursor.fetchall()
             
-            # Create a mapping of relative_path to image_id
-            path_to_id = {row[1]: row[0] for row in results}
+            # Create a mapping of relative_path to image_id, using the highest ID for duplicates
+            path_to_id = {}
+            for image_id, rel_path in results:
+                if rel_path not in path_to_id or image_id > path_to_id[rel_path]:
+                    path_to_id[rel_path] = image_id
+            
             image_ids = [path_to_id[rel_path] for rel_path in relative_paths if rel_path in path_to_id]
             
             if not image_ids:
@@ -3427,7 +3660,7 @@ class ImageViewer:
             conn.commit()
             conn.close()
             
-            # Invalidate cache for all affected images
+            # Invalidate cache for all affected images BEFORE refreshing views
             for filepath in self.selected_image_files:
                 self.invalidate_image_cache( filepath )
             
@@ -3438,6 +3671,8 @@ class ImageViewer:
                 # For small selections, refresh everything
                 self.refresh_database_view()
                 self.refresh_filtered_images()
+            # Note: load_image_tags_for_editing() is called automatically by 
+            # on_virtual_selection_changed() when refresh_filtered_images() runs
             
         except Exception as e:
             print( f"Error applying tag change: {e}" )
@@ -3527,6 +3762,8 @@ class ImageViewer:
         progress_window.destroy()
         # Only refresh filtered images for large selections
         self.refresh_filtered_images()
+        # Note: load_image_tags_for_editing() is called automatically by 
+        # on_virtual_selection_changed() when refresh_filtered_images() runs
         messagebox.showinfo( "Success", "Tag changes applied successfully!" )
         
     def show_async_error( self, progress_window, error_msg ):
@@ -4571,6 +4808,80 @@ class ImageViewer:
         if self.current_database_path:
             self.refresh_filtered_images()
     
+    def show_todo_list( self ):
+        """Show the TODO list dialog"""
+        # Create TODO dialog window
+        todo_window = tk.Toplevel( self.root )
+        todo_window.title( "TODO List - Planned Features" )
+        todo_window.geometry( "600x500" )
+        todo_window.transient( self.root )
+        todo_window.grab_set()
+        todo_window.resizable( True, True )
+        
+        # Center the window
+        todo_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 50) )
+        
+        # Main frame
+        main_frame = ttk.Frame( todo_window )
+        main_frame.pack( fill=tk.BOTH, expand=True, padx=10, pady=10 )
+        
+        # Title label
+        title_label = ttk.Label( main_frame, text="Planned Features and Improvements", 
+                                font=('TkDefaultFont', 12, 'bold') )
+        title_label.pack( pady=(0, 10) )
+        
+        # Create scrollable text area for TODO items
+        text_frame = ttk.Frame( main_frame )
+        text_frame.pack( fill=tk.BOTH, expand=True )
+        
+        # Text widget with scrollbar
+        todo_text = tk.Text( text_frame, wrap=tk.WORD, font=('TkDefaultFont', 10), 
+                            state=tk.DISABLED, bg='#f8f8f8', relief=tk.FLAT, 
+                            borderwidth=1, highlightthickness=1 )
+        scrollbar = ttk.Scrollbar( text_frame, orient=tk.VERTICAL, command=todo_text.yview )
+        todo_text.configure( yscrollcommand=scrollbar.set )
+        
+        todo_text.pack( side=tk.LEFT, fill=tk.BOTH, expand=True )
+        scrollbar.pack( side=tk.RIGHT, fill=tk.Y )
+        
+        # TODO items
+        todo_items = [
+            "Show path of file in the image preview window",
+            "Search for duplicate files at different paths",
+            "Sort images in filtered Images (and random order)",
+            "Add Tag to all files under a directory in browse tab (if they exist in current database)",
+            "Speed up large databases",
+            "Fix caching when quick scrolling in image preview window",
+            "Add database stats view that shows total files, total directories etc."
+        ]
+        
+        # Populate the text widget
+        todo_text.configure( state=tk.NORMAL )
+        
+        # Add header
+        todo_text.insert( tk.END, "The following features and improvements are planned for future releases:\n\n" )
+        
+        # Add each TODO item
+        for i, item in enumerate( todo_items, 1 ):
+            todo_text.insert( tk.END, f"{i}. {item}\n\n" )
+        
+        # Add footer
+        todo_text.insert( tk.END, "\nThese items are listed in no particular order of priority. " )
+        todo_text.insert( tk.END, "Some may be implemented sooner than others based on user feedback and development priorities." )
+        
+        todo_text.configure( state=tk.DISABLED )
+        
+        # Button frame
+        button_frame = ttk.Frame( main_frame )
+        button_frame.pack( fill=tk.X, pady=(10, 0) )
+        
+        # Close button
+        close_button = ttk.Button( button_frame, text="Close", command=todo_window.destroy )
+        close_button.pack( side=tk.RIGHT )
+        
+        # Focus the window
+        todo_window.focus_set()
+    
     def start_visibility_checking( self ):
         """Start the continuous visibility checking for thumbnails"""
         # Stop any existing timer
@@ -4924,8 +5235,8 @@ class ImageViewer:
             
             # Get image basic info
             relative_path = os.path.relpath( filepath, self.current_database )
-            cursor.execute( "SELECT id, rating, width, height FROM images WHERE relative_path = ?", (relative_path,) )
-            result = cursor.fetchone()
+            cursor.execute( "SELECT id, rating, width, height FROM images WHERE relative_path = ? ORDER BY id DESC", (relative_path,) )
+            result = cursor.fetchone()  # This will get the highest (most recent) ID
             
             if not result:
                 conn.close()
