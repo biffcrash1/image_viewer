@@ -914,6 +914,11 @@ class ImageViewer:
         paned.add( left_frame, weight=1 )
         
         ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
+        
+        # File path display for browse tab
+        self.browse_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
+        self.browse_path_label.pack( pady=(0, 5) )
+        
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
         
@@ -1028,6 +1033,11 @@ class ImageViewer:
         paned.add( left_frame, weight=1 )
         
         ttk.Label( left_frame, text="Image Preview" ).pack( pady=5 )
+        
+        # File path display for database tab
+        self.database_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
+        self.database_path_label.pack( pady=(0, 5) )
+        
         self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.database_preview_label.pack( fill=tk.BOTH, expand=True )
         
@@ -1901,6 +1911,12 @@ class ImageViewer:
 
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget"""
+        # Update the corresponding file path label
+        if label_widget == self.browse_preview_label:
+            self.browse_path_label.configure( text=filepath )
+        elif label_widget == self.database_preview_label:
+            self.database_path_label.configure( text=filepath )
+            
         try:
             image = Image.open( filepath )
             
@@ -1943,6 +1959,11 @@ class ImageViewer:
             label_widget.configure( image="", text=f"Error loading image:\n{str(e)}" )
             label_widget.image = None
             label_widget.current_image_path = None
+            # Clear the path label on error
+            if label_widget == self.browse_preview_label:
+                self.browse_path_label.configure( text="" )
+            elif label_widget == self.database_preview_label:
+                self.database_path_label.configure( text="" )
             
     def enter_fullscreen_mode( self, filepath ):
         """Enter fullscreen mode for viewing images with lazy loading for large databases"""
@@ -2271,6 +2292,7 @@ class ImageViewer:
                     self.current_database_image = None
                     self.database_preview_label.configure( image="", text=f"{len(selected_indices)} images selected" )
                     self.database_preview_label.image = None
+                    self.database_path_label.configure( text="" )
                     self.load_image_tags_for_editing()
                     # Clear file tags display for multiple selection
                     self.update_file_tags_display( None )
@@ -2280,6 +2302,7 @@ class ImageViewer:
             self.selected_image_files = []
             self.database_preview_label.configure( image="", text="No selection" )
             self.database_preview_label.image = None
+            self.database_path_label.configure( text="" )
             # Clear file tags display for no selection
             self.update_file_tags_display( None )
     
@@ -3095,6 +3118,7 @@ class ImageViewer:
             self.clear_image_list()
             self.database_preview_label.configure( image="", text="No database open" )
             self.database_preview_label.image = None
+            self.database_path_label.configure( text="" )
             self.clear_image_tag_interface()
             return
             
@@ -3351,6 +3375,7 @@ class ImageViewer:
                 self.current_database_image = None
                 self.database_preview_label.configure( image="", text="No images match filters" )
                 self.database_preview_label.image = None
+                self.database_path_label.configure( text="" )
                 self.selected_image_files = []
                 self.clear_image_tag_interface()
                 
@@ -3392,6 +3417,7 @@ class ImageViewer:
                 self.current_database_image = None
                 self.database_preview_label.configure( image="", text=f"{len(selection)} images selected" )
                 self.database_preview_label.image = None
+                self.database_path_label.configure( text="" )
                 self.load_image_tags_for_editing()
                 # Clear file tags display for multiple selection
                 self.update_file_tags_display( None )
@@ -4846,7 +4872,6 @@ class ImageViewer:
         
         # TODO items
         todo_items = [
-            "Show path of file in the image preview window",
             "Search for duplicate files at different paths",
             "Sort images in filtered Images (and random order)",
             "Add Tag to all files under a directory in browse tab (if they exist in current database)",
