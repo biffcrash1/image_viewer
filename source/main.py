@@ -1279,6 +1279,29 @@ class ImageViewer:
         image_frame = ttk.LabelFrame( vertical_paned, text="Filtered Images" )
         vertical_paned.add( image_frame, weight=2 )
         
+        # Sorting controls
+        sort_frame = ttk.Frame( image_frame )
+        sort_frame.pack( fill=tk.X, padx=5, pady=(5, 0) )
+        
+        ttk.Label( sort_frame, text="Sort by:" ).pack( side=tk.LEFT, padx=(0, 5) )
+        
+        self.sort_criteria_var = tk.StringVar( value="filename" )
+        sort_criteria_combo = ttk.Combobox( sort_frame, textvariable=self.sort_criteria_var, 
+                                          values=["filepath", "filename", "tags", "random"], 
+                                          state="readonly", width=12 )
+        sort_criteria_combo.pack( side=tk.LEFT, padx=(0, 5) )
+        sort_criteria_combo.bind( "<<ComboboxSelected>>", self.on_sort_criteria_changed )
+        
+        self.sort_ascending_var = tk.BooleanVar( value=True )
+        self.sort_direction_check = ttk.Checkbutton( sort_frame, text="Ascending", 
+                                                   variable=self.sort_ascending_var,
+                                                   command=self.on_sort_direction_changed )
+        self.sort_direction_check.pack( side=tk.LEFT, padx=(0, 5) )
+        
+        # Status label for sort info
+        self.sort_status_label = ttk.Label( sort_frame, text="", font=('TkDefaultFont', 8), foreground='gray' )
+        self.sort_status_label.pack( side=tk.RIGHT )
+        
         # Store references to paned windows for size management
         self.vertical_paned = vertical_paned
         self.horizontal_paned = paned  # Reference to the main horizontal paned window
@@ -3459,6 +3482,11 @@ class ImageViewer:
             # Set items in virtual list
             self.virtual_image_list.set_items( virtual_items )
             
+            # Apply current sorting if we have items
+            if virtual_items and hasattr( self, 'sort_criteria_var' ):
+                # Apply sorting without triggering callbacks to avoid recursion
+                self.apply_sorting_internal()
+            
             # Update status label
             self.update_image_list_status()
             
@@ -4432,6 +4460,193 @@ class ImageViewer:
             
         self.refresh_filtered_images()
         
+    def on_sort_criteria_changed( self, event=None ):
+        """Handle sort criteria change"""
+        # Disable ascending/descending for random sort
+        criteria = self.sort_criteria_var.get()
+        if criteria == "random":
+            self.sort_direction_check.configure( state="disabled" )
+            self.sort_status_label.configure( text="Random order" )
+        else:
+            self.sort_direction_check.configure( state="normal" )
+            direction = "ascending" if self.sort_ascending_var.get() else "descending"
+            self.sort_status_label.configure( text=f"Sorted by {criteria} ({direction})" )
+        
+        # Apply new sorting
+        self.apply_sorting()
+        
+    def on_sort_direction_changed( self ):
+        """Handle sort direction change"""
+        criteria = self.sort_criteria_var.get()
+        if criteria != "random":
+            direction = "ascending" if self.sort_ascending_var.get() else "descending"
+            self.sort_status_label.configure( text=f"Sorted by {criteria} ({direction})" )
+            
+            # Apply new sorting
+            self.apply_sorting()
+    
+    def apply_sorting( self ):
+        """Apply current sorting criteria to the filtered images list"""
+        if not hasattr( self, 'virtual_image_list' ) or not self.virtual_image_list:
+            return
+            
+        # Get current items
+        items = self.virtual_image_list.filtered_items[:]
+        if not items:
+            return
+            
+        # Preserve current selection
+        current_selection = []
+        if self.virtual_image_list.selected_indices:
+            for idx in self.virtual_image_list.selected_indices:
+                if idx < len( items ):
+                    current_selection.append( items[idx]['filename'] )
+        
+        # Apply sorting
+        criteria = self.sort_criteria_var.get()
+        ascending = self.sort_ascending_var.get()
+        
+        try:
+            if criteria == "random":
+                import random
+                random.shuffle( items )
+            elif criteria == "filename":
+                items.sort( key=lambda x: x['filename'].lower(), reverse=not ascending )
+            elif criteria == "filepath":
+                items.sort( key=lambda x: x['filepath'].lower(), reverse=not ascending )
+            elif criteria == "tags":
+                # Sort by tag count first, then by first tag alphabetically
+                def get_tag_sort_key( item ):
+                    tags = self.get_image_tags( item['filepath'] )
+                    if not tags:
+                        return ( 0, "" )  # No tags go first/last depending on direction
+                    return ( len( tags ), tags[0].lower() if tags else "" )
+                
+                items.sort( key=get_tag_sort_key, reverse=not ascending )
+                
+        except Exception as e:
+            print( f"Error sorting items: {e}" )
+            return
+        
+        # Update the virtual image list with sorted items
+        self.virtual_image_list.filtered_items = items
+        self.virtual_image_list.refresh_treeview()
+        
+        # Restore selection
+        if current_selection:
+            new_selection_indices = set()
+            for i, item in enumerate( items ):
+                if item['filename'] in current_selection:
+                    new_selection_indices.add( i )
+            
+            if new_selection_indices:
+                self.virtual_image_list.selected_indices = new_selection_indices
+                self.virtual_image_list.update_selection_display()
+                
+                # Update treeview selection
+                if hasattr( self.virtual_image_list, 'treeview' ):
+                    self.virtual_image_list.treeview.selection_remove(
+                        self.virtual_image_list.treeview.selection()
+                    )
+                    for idx in new_selection_indices:
+                        item_id = str( idx )
+                        self.virtual_image_list.treeview.selection_add( item_id )
+                    
+                    # Scroll to first selected item
+                    if new_selection_indices:
+                        first_selected = min( new_selection_indices )
+                        self.virtual_image_list.treeview.see( str( first_selected ) )
+                
+                # Trigger selection callback with first selected item
+                self.on_virtual_selection_changed( list( new_selection_indices ) )
+        
+        # Trigger thumbnail loading if enabled
+        if self.show_thumbnails.get():
+            self.virtual_image_list.parent.after( 100, self.virtual_image_list.load_visible_thumbnails_debounced )
+    
+    def apply_sorting_internal( self ):
+        """Apply sorting without UI updates (used during refresh to avoid recursion)"""
+        if not hasattr( self, 'virtual_image_list' ) or not self.virtual_image_list:
+            return
+            
+        # Get current items
+        items = self.virtual_image_list.filtered_items[:]
+        if not items:
+            return
+        
+        # Apply sorting
+        criteria = self.sort_criteria_var.get()
+        ascending = self.sort_ascending_var.get()
+        
+        try:
+            if criteria == "random":
+                import random
+                random.shuffle( items )
+            elif criteria == "filename":
+                items.sort( key=lambda x: x['filename'].lower(), reverse=not ascending )
+            elif criteria == "filepath":
+                items.sort( key=lambda x: x['filepath'].lower(), reverse=not ascending )
+            elif criteria == "tags":
+                # Sort by tag count first, then by first tag alphabetically
+                def get_tag_sort_key( item ):
+                    tags = self.get_image_tags( item['filepath'] )
+                    if not tags:
+                        return ( 0, "" )  # No tags go first/last depending on direction
+                    return ( len( tags ), tags[0].lower() if tags else "" )
+                
+                items.sort( key=get_tag_sort_key, reverse=not ascending )
+                
+        except Exception as e:
+            print( f"Error sorting items: {e}" )
+            return
+        
+        # Update the virtual image list with sorted items
+        self.virtual_image_list.filtered_items = items
+        self.virtual_image_list.refresh_treeview()
+        
+        # Update sort status
+        if criteria == "random":
+            self.sort_status_label.configure( text="Random order" )
+        else:
+            direction = "ascending" if ascending else "descending"
+            self.sort_status_label.configure( text=f"Sorted by {criteria} ({direction})" )
+    
+    def get_image_tags( self, filepath ):
+        """Get tags for an image from the database"""
+        if not self.current_database_path:
+            return []
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get image ID
+            relative_path = os.path.relpath( filepath, self.current_database )
+            cursor.execute( "SELECT id FROM images WHERE relative_path = ?", (relative_path,) )
+            result = cursor.fetchone()
+            
+            if not result:
+                conn.close()
+                return []
+                
+            image_id = result[0]
+            
+            # Get tags for this image
+            cursor.execute( '''
+                SELECT t.name FROM tags t
+                JOIN image_tags it ON t.id = it.tag_id
+                WHERE it.image_id = ?
+                ORDER BY t.name
+            ''', (image_id,) )
+            
+            tags = [row[0] for row in cursor.fetchall()]
+            conn.close()
+            return tags
+            
+        except Exception as e:
+            print( f"Error getting tags for {filepath}: {e}" )
+            return []
+        
     def show_tag_dialog( self, filepath ):
         """Show dialog for adding/editing tags for an image"""
         if not self.current_database_path:
@@ -5087,7 +5302,6 @@ class ImageViewer:
         # TODO items
         todo_items = [
             "Search for duplicate files at different paths",
-            "Sort images in filtered Images (and random order)",
             "Speed up large databases",
             "Fix caching when quick scrolling in image preview window",
             "Add database stats view that shows total files, total directories etc."
