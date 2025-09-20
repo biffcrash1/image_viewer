@@ -1802,18 +1802,18 @@ class ImageViewer:
                 
     def on_database_preview_scroll( self, event ):
         """Handle mouse wheel scrolling over database preview image"""
-        if not self.current_database_path:
+        if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
             return
             
-        # Get current selection and total items
-        current_selection = self.database_image_listbox.curselection()
-        total_items = self.database_image_listbox.size()
+        # Get current selection and total items from virtual image list
+        current_indices = list( self.virtual_image_list.selected_indices )
+        total_items = len( self.virtual_image_list.filtered_items )
         
         if total_items == 0:
             return
             
-        if current_selection:
-            current_index = current_selection[0]
+        if current_indices:
+            current_index = current_indices[0]  # Use first selected item
         else:
             current_index = 0
             
@@ -1830,44 +1830,89 @@ class ImageViewer:
             else:
                 return  # Already at last image
                 
-        # Select the new item and auto-scroll the listbox to keep it visible
-        self.database_image_listbox.selection_clear( 0, tk.END )
-        self.database_image_listbox.selection_set( new_index )
-        self.database_image_listbox.see( new_index )  # Auto-scroll to ensure the selected item is visible
+        # Update selection in virtual image list
+        self.virtual_image_list.selected_indices = {new_index}
+        self.virtual_image_list.update_selection_display()
+        
+        # Update treeview selection for proper visual feedback and thumbnail loading
+        if hasattr( self.virtual_image_list, 'treeview' ):
+            self.virtual_image_list.treeview.selection_remove(
+                self.virtual_image_list.treeview.selection()
+            )
+            item_id = str( new_index )
+            self.virtual_image_list.treeview.selection_add( item_id )
+            self.virtual_image_list.treeview.see( item_id )  # Auto-scroll to keep visible
+            
+            # Explicitly trigger thumbnail loading for newly visible items
+            if self.show_thumbnails.get():
+                self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
+                self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
         
         # Trigger the selection event to update preview and tags
-        self.on_database_image_select( None )
+        self.on_virtual_selection_changed( [new_index] )
         
     def on_database_preview_scroll_up( self, event ):
         """Handle scroll up (Button-4) for database preview"""
-        if not self.current_database_path:
+        if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
             return
             
-        current_selection = self.database_image_listbox.curselection()
-        if current_selection:
-            current_index = current_selection[0]
+        current_indices = list( self.virtual_image_list.selected_indices )
+        if current_indices:
+            current_index = current_indices[0]
             if current_index > 0:
                 new_index = current_index - 1
-                self.database_image_listbox.selection_clear( 0, tk.END )
-                self.database_image_listbox.selection_set( new_index )
-                self.database_image_listbox.see( new_index )
-                self.on_database_image_select( None )
+                
+                # Update selection in virtual image list
+                self.virtual_image_list.selected_indices = {new_index}
+                self.virtual_image_list.update_selection_display()
+                
+                # Update treeview selection
+                if hasattr( self.virtual_image_list, 'treeview' ):
+                    self.virtual_image_list.treeview.selection_remove(
+                        self.virtual_image_list.treeview.selection()
+                    )
+                    item_id = str( new_index )
+                    self.virtual_image_list.treeview.selection_add( item_id )
+                    self.virtual_image_list.treeview.see( item_id )
+                    
+                    # Explicitly trigger thumbnail loading for newly visible items
+                    if self.show_thumbnails.get():
+                        self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
+                        self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
+                
+                self.on_virtual_selection_changed( [new_index] )
                 
     def on_database_preview_scroll_down( self, event ):
         """Handle scroll down (Button-5) for database preview"""
-        if not self.current_database_path:
+        if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
             return
             
-        current_selection = self.database_image_listbox.curselection()
-        total_items = self.database_image_listbox.size()
-        if current_selection and total_items > 0:
-            current_index = current_selection[0]
+        current_indices = list( self.virtual_image_list.selected_indices )
+        total_items = len( self.virtual_image_list.filtered_items )
+        if current_indices and total_items > 0:
+            current_index = current_indices[0]
             if current_index < total_items - 1:
                 new_index = current_index + 1
-                self.database_image_listbox.selection_clear( 0, tk.END )
-                self.database_image_listbox.selection_set( new_index )
-                self.database_image_listbox.see( new_index )
-                self.on_database_image_select( None )
+                
+                # Update selection in virtual image list
+                self.virtual_image_list.selected_indices = {new_index}
+                self.virtual_image_list.update_selection_display()
+                
+                # Update treeview selection
+                if hasattr( self.virtual_image_list, 'treeview' ):
+                    self.virtual_image_list.treeview.selection_remove(
+                        self.virtual_image_list.treeview.selection()
+                    )
+                    item_id = str( new_index )
+                    self.virtual_image_list.treeview.selection_add( item_id )
+                    self.virtual_image_list.treeview.see( item_id )
+                    
+                    # Explicitly trigger thumbnail loading for newly visible items
+                    if self.show_thumbnails.get():
+                        self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
+                        self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
+                
+                self.on_virtual_selection_changed( [new_index] )
                 
     def apply_exif_orientation( self, image ):
         """Apply EXIF orientation to rotate image correctly"""
@@ -4537,7 +4582,14 @@ class ImageViewer:
             if hasattr( self, 'horizontal_paned' ):
                 pos = self.horizontal_paned.sashpos( 0 )
                 if pos > 0:  # Only save valid positions
-                    settings["horizontal_paned_pos"] = pos
+                    # Validate position is reasonable relative to window size
+                    window_width = self.root.winfo_width()
+                    min_pos = 200  # Minimum space for left panel
+                    max_pos = window_width - 300  # Ensure at least 300px for right panel
+                    
+                    # Only save position if it's within reasonable bounds
+                    if min_pos <= pos <= max_pos:
+                        settings["horizontal_paned_pos"] = pos
                     
         except Exception as e:
             print( f"Error saving paned positions: {e}" )
@@ -4673,8 +4725,19 @@ class ImageViewer:
             # Restore horizontal paned position (main database paned window)
             if hasattr( self, 'horizontal_paned' ) and "horizontal_paned_pos" in settings:
                 pos = settings["horizontal_paned_pos"]
-                if pos > 100:  # Ensure reasonable minimum
+                # Get current window width to validate position
+                self.root.update_idletasks()  # Ensure geometry is updated
+                window_width = self.root.winfo_width()
+                
+                # Ensure position is within reasonable bounds
+                min_pos = 200  # Minimum space for left panel
+                max_pos = window_width - 300  # Ensure at least 300px for right panel
+                
+                if min_pos <= pos <= max_pos:
                     self.horizontal_paned.sashpos( 0, pos )
+                elif pos > max_pos:
+                    # If saved position would push right panel off-screen, use maximum safe position
+                    self.horizontal_paned.sashpos( 0, max_pos )
                         
         except Exception as e:
             print( f"Error restoring paned positions: {e}" )
