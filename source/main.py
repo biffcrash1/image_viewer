@@ -985,7 +985,7 @@ class ImageViewer:
         tree_frame = ttk.Frame( right_frame )
         tree_frame.pack( fill=tk.BOTH, expand=True )
         
-        self.browse_tree = ttk.Treeview( tree_frame )
+        self.browse_tree = ttk.Treeview( tree_frame, selectmode='extended' )
         tree_scrollbar = ttk.Scrollbar( tree_frame, orient=tk.VERTICAL, command=self.browse_tree.yview )
         self.browse_tree.configure( yscrollcommand=tree_scrollbar.set )
         
@@ -995,7 +995,11 @@ class ImageViewer:
         # Bind tree events
         self.browse_tree.bind( "<<TreeviewSelect>>", self.on_browse_tree_select )
         self.browse_tree.bind( "<Double-1>", self.on_browse_tree_double_click )
+        self.browse_tree.bind( "<Button-1>", self.on_browse_tree_click )
         self.browse_tree.bind( "<Button-3>", self.on_browse_tree_right_click )
+        
+        # Initialize selection tracking for browse tree
+        self.browse_tree_last_clicked = None
         
         # Initial directory will be loaded after settings are loaded
         
@@ -1558,6 +1562,70 @@ class ImageViewer:
         """Check if file is a supported image format"""
         return Path( filepath ).suffix.lower() in self.supported_formats
         
+    def is_file_in_database( self, filepath ):
+        """Check if a file exists in the current database"""
+        if not self.current_database_path:
+            return False
+            
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            relative_path = os.path.relpath( filepath, self.current_database )
+            cursor.execute( "SELECT id FROM images WHERE relative_path = ?", (relative_path,) )
+            result = cursor.fetchone()
+            
+            conn.close()
+            return result is not None
+        except Exception:
+            return False
+        
+    def on_browse_tree_click( self, event ):
+        """Handle click events for proper CTRL/SHIFT multi-selection in browse tree"""
+        item = self.browse_tree.identify_row( event.y )
+        if not item:
+            return
+            
+        if event.state & 0x4:  # Ctrl key - toggle selection
+            if item in self.browse_tree.selection():
+                self.browse_tree.selection_remove( item )
+            else:
+                self.browse_tree.selection_add( item )
+            self.browse_tree_last_clicked = item
+            
+        elif event.state & 0x1:  # Shift key - range selection
+            if self.browse_tree_last_clicked:
+                # Get all items in the tree
+                all_items = self.get_all_tree_items( self.browse_tree )
+                
+                try:
+                    start_idx = all_items.index( self.browse_tree_last_clicked )
+                    end_idx = all_items.index( item )
+                    
+                    # Select range
+                    start, end = min( start_idx, end_idx ), max( start_idx, end_idx )
+                    items_to_select = all_items[start:end+1]
+                    self.browse_tree.selection_set( items_to_select )
+                except ValueError:
+                    # Item not found, just select the clicked item
+                    self.browse_tree.selection_set( item )
+            else:
+                self.browse_tree.selection_set( item )
+            self.browse_tree_last_clicked = item
+            
+        else:  # Normal click - single selection
+            self.browse_tree.selection_set( item )
+            self.browse_tree_last_clicked = item
+            
+    def get_all_tree_items( self, tree, parent="" ):
+        """Get all items in tree in display order"""
+        items = []
+        for child in tree.get_children( parent ):
+            items.append( child )
+            if tree.item( child, "open" ):  # If expanded, include children
+                items.extend( self.get_all_tree_items( tree, child ) )
+        return items
+
     def on_browse_tree_select( self, event ):
         """Handle selection in browse tree"""
         selection = self.browse_tree.selection()
@@ -1588,18 +1656,74 @@ class ImageViewer:
                 self.enter_fullscreen_mode( filepath )
                 
     def on_browse_tree_right_click( self, event ):
-        """Handle right click in browse tree"""
+        """Handle right click in browse tree - show context menu"""
         item = self.browse_tree.identify_row( event.y )
-        if item:
+        if not item:
+            return
+            
+        # If right-clicked item is not selected, select it (clear other selections)
+        if item not in self.browse_tree.selection():
+            self.browse_tree.selection_set( item )
+            self.browse_tree_last_clicked = item
+            
+        # Show context menu based on selection
+        self.show_browse_context_menu( event )
+        
+    def show_browse_context_menu( self, event ):
+        """Show context menu for browse tree selection"""
+        if not self.current_database_path:
+            # No database open - limited options
+            context_menu = tk.Menu( self.root, tearoff=0 )
+            selection = self.browse_tree.selection()
+            if len( selection ) == 1:
+                item = selection[0]
+                filepath = self.browse_tree.item( item )['values'][0]
+                if os.path.isdir( filepath ):
+                    context_menu.add_command( label="Create Database Here", 
+                                            command=lambda: self.create_database_in_directory( filepath ) )
+            
+            if context_menu.index( tk.END ) is not None:  # Menu has items
+                try:
+                    context_menu.tk_popup( event.x_root, event.y_root )
+                finally:
+                    context_menu.grab_release()
+            return
+            
+        # Database is open - show tag editing options
+        context_menu = tk.Menu( self.root, tearoff=0 )
+        selection = self.browse_tree.selection()
+        
+        if len( selection ) == 1:
+            # Single selection
+            item = selection[0]
             filepath = self.browse_tree.item( item )['values'][0]
             
-            # Select the item that was right-clicked
-            self.browse_tree.selection_set( item )
-            
             if self.is_image_file( filepath ):
-                self.show_tag_dialog( filepath )
+                context_menu.add_command( label="Edit Tags...", 
+                                        command=lambda: self.show_tag_dialog( filepath ) )
             elif os.path.isdir( filepath ):
-                self.show_directory_context_menu( event, filepath )
+                context_menu.add_command( label="Edit Tags for Directory (Recursive)...", 
+                                        command=lambda: self.show_directory_tag_dialog( filepath ) )
+                context_menu.add_separator()
+                context_menu.add_command( label="Create Database Here", 
+                                        command=lambda: self.create_database_in_directory( filepath ) )
+        else:
+            # Multiple selection - check if any are images in database
+            image_files = []
+            for item in selection:
+                filepath = self.browse_tree.item( item )['values'][0]
+                if self.is_image_file( filepath ) and self.is_file_in_database( filepath ):
+                    image_files.append( filepath )
+                    
+            if image_files:
+                context_menu.add_command( label=f"Edit Tags for {len(image_files)} Images...", 
+                                        command=lambda: self.show_multi_tag_dialog( image_files ) )
+        
+        if context_menu.index( tk.END ) is not None:  # Menu has items
+            try:
+                context_menu.tk_popup( event.x_root, event.y_root )
+            finally:
+                context_menu.grab_release()
                 
     def on_browse_preview_double_click( self, event ):
         """Handle double click on browse preview image"""
@@ -2387,15 +2511,6 @@ class ImageViewer:
         except Exception as e:
             messagebox.showerror( "Error", f"Failed to create database: {str(e)}" )
             
-    def show_directory_context_menu( self, event, directory_path ):
-        """Show context menu for directory right-click"""
-        context_menu = tk.Menu( self.root, tearoff=0 )
-        context_menu.add_command( label="Create Database Here", command=lambda: self.create_database_in_directory( directory_path ) )
-        
-        try:
-            context_menu.tk_popup( event.x_root, event.y_root )
-        finally:
-            context_menu.grab_release()
             
     def create_database_in_directory( self, directory_path ):
         """Create a database in the specified directory"""
@@ -4298,6 +4413,42 @@ class ImageViewer:
         self.refresh_database_view()
         self.refresh_tag_filters()
         
+    def show_directory_tag_dialog( self, directory_path ):
+        """Show dialog for adding/editing tags for all images in a directory recursively"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+            
+        # Find all image files in directory recursively that are in the database
+        image_files = []
+        try:
+            for root, dirs, files in os.walk( directory_path ):
+                for file in files:
+                    filepath = os.path.join( root, file )
+                    if self.is_image_file( filepath ) and self.is_file_in_database( filepath ):
+                        image_files.append( filepath )
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to scan directory: {str(e)}" )
+            return
+            
+        if not image_files:
+            messagebox.showinfo( "No Images", "No images found in the directory that are in the current database." )
+            return
+            
+        # Show confirmation dialog
+        result = messagebox.askyesno( 
+            "Confirm Directory Tag Edit",
+            f"Edit tags for {len(image_files)} images found in:\n{directory_path}\n\nContinue?"
+        )
+        
+        if result:
+            dialog = MultiTagDialog( self.root, image_files, self.current_database_path )
+            self.root.wait_window( dialog.dialog )
+            
+            # Refresh views after tag changes
+            self.refresh_database_view()
+            self.refresh_tag_filters()
+        
     def refresh_tag_filters( self ):
         """Refresh the tag filters to add new tags and remove unused ones"""
         if not self.current_database_path:
@@ -4874,7 +5025,6 @@ class ImageViewer:
         todo_items = [
             "Search for duplicate files at different paths",
             "Sort images in filtered Images (and random order)",
-            "Add Tag to all files under a directory in browse tab (if they exist in current database)",
             "Speed up large databases",
             "Fix caching when quick scrolling in image preview window",
             "Add database stats view that shows total files, total directories etc."
