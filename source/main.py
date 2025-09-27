@@ -17,6 +17,7 @@ import json
 import bisect
 from collections import deque
 import weakref
+import shutil
 
 class TreeviewImageList:
     """Treeview-based image list that handles large datasets without coordinate limits"""
@@ -54,7 +55,7 @@ class TreeviewImageList:
         self._verifying_thumbnails = False  # Flag to prevent multiple simultaneous verifications
         
         # Debouncing for thumbnail loading
-        self.thumbnail_load_delay = 50  # ms delay before loading (reduced from 200)
+        self.thumbnail_load_delay = 200  # ms delay before loading (increased for large datasets)
         self.pending_thumbnail_loads = {}  # {item_id: after_id}
         self.last_scroll_time = 0
         
@@ -136,7 +137,15 @@ class TreeviewImageList:
         # Clear existing items
         for item in self.treeview.get_children():
             self.treeview.delete( item )
-            
+        
+        # Check if we need chunked loading for large datasets
+        if len( self.filtered_items ) > 1000:
+            self.refresh_treeview_chunked()
+        else:
+            self.refresh_treeview_immediate()
+    
+    def refresh_treeview_immediate( self ):
+        """Immediate refresh for smaller datasets"""
         # Add filtered items
         for i, item_data in enumerate( self.filtered_items ):
             filename = item_data.get( 'filename', 'Unknown' )
@@ -154,7 +163,6 @@ class TreeviewImageList:
                     # Use cached thumbnail immediately
                     try:
                         self.treeview.item( item_id, image=self._thumbnail_cache[filepath] )
-
                     except Exception as e:
                         print( f"CACHED: Error applying cached thumbnail for {item_id}: {e}" )
         
@@ -162,9 +170,105 @@ class TreeviewImageList:
         if any( item_data.get( 'show_thumbnails', False ) for item_data in self.filtered_items ):
             self.parent.after( 100, self.load_initial_visible_thumbnails )
     
+    def refresh_treeview_chunked( self ):
+        """Chunked refresh for large datasets to prevent UI blocking"""
+        self.chunked_refresh_data = {
+            'current_index': 0,
+            'chunk_size': 2000,  # Process 2000 items at a time for better speed
+            'total_items': len( self.filtered_items ),
+            'start_time': time.time()
+        }
+        
+        # Start chunked processing
+        self._process_treeview_chunk()
+    
+    def _process_treeview_chunk( self ):
+        """Process a chunk of treeview items"""
+        if not hasattr( self, 'chunked_refresh_data' ):
+            return
+        
+        data = self.chunked_refresh_data
+        start_idx = data['current_index']
+        end_idx = min( start_idx + data['chunk_size'], data['total_items'] )
+        
+        # Process chunk
+        for i in range( start_idx, end_idx ):
+            item_data = self.filtered_items[i]
+            filename = item_data.get( 'filename', 'Unknown' )
+            filepath = item_data.get( 'filepath' )
+            show_thumbnails = item_data.get( 'show_thumbnails', False )
+            
+            # Insert item with filename
+            item_id = str( i )
+            self.treeview.insert( '', 'end', iid=item_id, text=filename )
+            
+            # Only set cached thumbnails immediately
+            if show_thumbnails and filepath and os.path.exists( filepath ):
+                if filepath in self._thumbnail_cache:
+                    try:
+                        self.treeview.item( item_id, image=self._thumbnail_cache[filepath] )
+                    except Exception as e:
+                        print( f"CACHED: Error applying cached thumbnail for {item_id}: {e}" )
+        
+        # Update progress
+        data['current_index'] = end_idx
+        
+        # Update main app status if available
+        if self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+            try:
+                # Show progress in status
+                progress_text = f"Loading UI: {end_idx:,}/{data['total_items']:,} items"
+                if hasattr( self.main_app, 'image_list_status_label' ):
+                    self.main_app.image_list_status_label.configure( text=progress_text )
+                self.main_app.root.update_idletasks()
+            except Exception:
+                pass  # Ignore errors in status update
+        
+        # Continue processing or finish
+        if end_idx < data['total_items']:
+            # Schedule next chunk with minimal delay for speed
+            self.parent.after( 1, self._process_treeview_chunk )
+        else:
+            # Finished - clean up and start thumbnail loading
+            self._finish_chunked_refresh()
+    
+    def _finish_chunked_refresh( self ):
+        """Finish chunked refresh and start thumbnail loading"""
+        # Clean up chunked refresh data
+        if hasattr( self, 'chunked_refresh_data' ):
+            elapsed = time.time() - self.chunked_refresh_data['start_time']
+            total_items = self.chunked_refresh_data['total_items']
+            # Chunked treeview refresh completed
+            delattr( self, 'chunked_refresh_data' )
+        
+        # Ensure treeview is responsive and selection works
+        try:
+            # Force treeview update
+            self.treeview.update_idletasks()
+            
+            # Select first item if no selection exists and we have items
+            if self.filtered_items and not self.selected_indices:
+                self.treeview.selection_set( "0" )
+                self.selected_indices = {0}
+                # Don't manually trigger callback - let TreeviewSelect event handle it
+                    
+        except Exception as e:
+            print( f"Error setting initial selection after chunked refresh: {e}" )
+        
+        # Update final status
+        if self.main_app and hasattr( self.main_app, 'update_image_list_status' ):
+            self.main_app.update_image_list_status()
+        
+        # Start thumbnail loading for visible items
+        if any( item_data.get( 'show_thumbnails', False ) for item_data in self.filtered_items ):
+            self.parent.after( 100, self.load_initial_visible_thumbnails )
+    
     def load_initial_visible_thumbnails( self ):
         """Load thumbnails for initially visible items and preload adjacent ones"""
         try:
+            # Skip thumbnail loading if main app is in performance mode
+            if self.main_app and hasattr( self.main_app, 'performance_mode' ) and self.main_app.performance_mode:
+                return
             # Get actually visible items
             visible_items = self.get_visible_treeview_items()
             
@@ -201,12 +305,21 @@ class TreeviewImageList:
             
     def on_selection_changed( self, event ):
         """Handle treeview selection changes"""
-        selected_items = self.treeview.selection()
-        self.selected_indices = {int(item) for item in selected_items if item.isdigit()}
-        
-        # Notify callbacks
-        for callback in self.selection_callbacks:
-            callback( list(self.selected_indices) )
+        try:
+            selected_items = self.treeview.selection()
+            self.selected_indices = {int(item) for item in selected_items if item.isdigit()}
+            
+            # Selection changed - update internal state (no debug output)
+            
+            # Notify callbacks
+            for callback in self.selection_callbacks:
+                try:
+                    callback( list(self.selected_indices) )
+                except Exception as e:
+                    print( f"Error in selection callback: {e}" )
+                    
+        except Exception as e:
+            print( f"Error in on_selection_changed: {e}" )
             
     def on_click( self, event ):
         """Handle click events for proper CTRL/SHIFT selection"""
@@ -236,8 +349,9 @@ class TreeviewImageList:
                 self.treeview.selection_set( item )
                 self.last_clicked_index = index
                 
-        # Trigger selection change manually since we're overriding default behavior
-        self.on_selection_changed( event )
+        # Don't manually trigger selection change - let the TreeviewSelect event handle it
+        # This prevents duplicate processing and potential hanging
+        pass
         
     def on_double_click( self, event ):
         """Handle double click events"""
@@ -606,8 +720,8 @@ class TreeviewImageList:
         # Clear priority queue to avoid loading thumbnails for old positions
         self.priority_thumbnail_queue.clear()
         
-        # Schedule thumbnail loading check after scroll stops
-        self.parent.after( self.thumbnail_load_delay + 25, self.check_scroll_stopped )
+        # Schedule thumbnail loading check after scroll stops (increased delay for better performance)
+        self.parent.after( self.thumbnail_load_delay + 100, self.check_scroll_stopped )
         
     def on_scroll_release( self, event ):
         """Handle scrollbar release"""
@@ -810,6 +924,10 @@ class ImageViewer:
         self.current_database_path = None
         self.current_image = None
         self.startup_complete = False  # Flag to prevent saving state during startup
+        
+        # Performance mode flags
+        self.performance_mode = False  # Disable heavy operations during large operations
+        self.last_interaction_time = 0  # Track user interaction for performance mode
         self.current_directory = None
         self.fullscreen_window = None
         self.fullscreen_images = []
@@ -838,7 +956,11 @@ class ImageViewer:
         self.thumbnail_load_queue = []  # Queue of items waiting for thumbnail loading
         self.thumbnail_loading = False  # Flag to prevent concurrent loading
         self.visible_items_timer = {}  # Track how long items have been visible
-        self.visibility_check_timer = None  # Timer for periodic visibility checks
+        self.visibility_check_timer = None
+        
+        # Quickmove settings
+        self.quickmove_enabled = tk.BooleanVar( value=False )
+        self.quickmove_path = tk.StringVar( value="" )
         
         # Supported image formats
         self.supported_formats = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.tiff', '.webp'}
@@ -846,6 +968,7 @@ class ImageViewer:
         self.setup_ui()
         self.setup_database_menu()
         self.load_settings()
+        self.load_quickmove_settings()
         
         # Restore window geometry and active tab after everything is set up
         self.root.after( 100, self.restore_window_geometry )
@@ -919,6 +1042,28 @@ class ImageViewer:
         self.browse_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
         self.browse_path_label.pack( pady=(0, 5) )
         
+        # Quickmove controls for browse tab
+        self.browse_quickmove_frame = ttk.Frame( left_frame )
+        self.browse_quickmove_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
+        
+        self.browse_quickmove_check = ttk.Checkbutton( self.browse_quickmove_frame, text="Quickmove", 
+                                                      variable=self.quickmove_enabled,
+                                                      command=self.on_quickmove_toggle )
+        self.browse_quickmove_check.pack( side=tk.LEFT, padx=(0, 5) )
+        
+        self.browse_quickmove_path_frame = ttk.Frame( self.browse_quickmove_frame )
+        
+        self.browse_quickmove_entry = ttk.Entry( self.browse_quickmove_path_frame, textvariable=self.quickmove_path, width=30 )
+        self.browse_quickmove_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        
+        self.browse_quickmove_browse_btn = ttk.Button( self.browse_quickmove_path_frame, text="Browse", 
+                                                      command=self.browse_quickmove_folder )
+        self.browse_quickmove_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
+        
+        self.browse_quickmove_indicator = ttk.Label( self.browse_quickmove_path_frame, text="●", 
+                                                    foreground="green", font=('TkDefaultFont', 12) )
+        self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
         
@@ -960,6 +1105,9 @@ class ImageViewer:
         self.browse_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
         self.browse_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
         self.browse_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
+        
+        # Add Quickmove shortcut for browse preview
+        self.browse_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -1042,6 +1190,28 @@ class ImageViewer:
         self.database_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
         self.database_path_label.pack( pady=(0, 5) )
         
+        # Quickmove controls for database tab
+        self.database_quickmove_frame = ttk.Frame( left_frame )
+        self.database_quickmove_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
+        
+        self.database_quickmove_check = ttk.Checkbutton( self.database_quickmove_frame, text="Quickmove", 
+                                                        variable=self.quickmove_enabled,
+                                                        command=self.on_quickmove_toggle )
+        self.database_quickmove_check.pack( side=tk.LEFT, padx=(0, 5) )
+        
+        self.database_quickmove_path_frame = ttk.Frame( self.database_quickmove_frame )
+        
+        self.database_quickmove_entry = ttk.Entry( self.database_quickmove_path_frame, textvariable=self.quickmove_path, width=30 )
+        self.database_quickmove_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        
+        self.database_quickmove_browse_btn = ttk.Button( self.database_quickmove_path_frame, text="Browse", 
+                                                        command=self.browse_quickmove_folder )
+        self.database_quickmove_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
+        
+        self.database_quickmove_indicator = ttk.Label( self.database_quickmove_path_frame, text="●", 
+                                                      foreground="green", font=('TkDefaultFont', 12) )
+        self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        
         self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.database_preview_label.pack( fill=tk.BOTH, expand=True )
         
@@ -1102,6 +1272,9 @@ class ImageViewer:
         self.database_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
         self.database_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
         self.database_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
+        
+        # Add Quickmove shortcut for database preview
+        self.database_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
         
         # Right column - Tag filters and image list
         right_frame = ttk.Frame( paned )
@@ -1400,9 +1573,10 @@ class ImageViewer:
             vlist = self.virtual_image_list
             print( "\n=== VIRTUAL SCROLLING DEBUG ===" )
             print( f"Total filtered items: {len(vlist.filtered_items)}" )
-            print( f"Rendered items: {len(vlist.rendered_items)}" )
-            print( f"Viewport: start={vlist.viewport_start}, end={vlist.viewport_end}" )
-            print( f"Percentage through list: {(vlist.viewport_end / len(vlist.filtered_items) * 100):.1f}%" )
+            print( f"Selected indices: {vlist.selected_indices}" )
+            print( f"Treeview children count: {len(vlist.treeview.get_children()) if hasattr(vlist, 'treeview') else 'No treeview'}" )
+            if hasattr( vlist, 'treeview' ):
+                print( f"Treeview selection: {vlist.treeview.selection()}" )
             
             # Check data integrity around problematic area
             print( "\nChecking data integrity around index 500..." )
@@ -1657,6 +1831,8 @@ class ImageViewer:
             filepath = self.browse_tree.item( item )['values'][0]
             
             if self.is_image_file( filepath ):
+                # Clear quickmove indicators when selecting new image
+                self.hide_quickmove_indicators()
                 self.current_browse_image = filepath
                 self.current_browse_directory = os.path.dirname( filepath )
                 self.update_browse_folder_images( filepath )
@@ -1779,6 +1955,9 @@ class ImageViewer:
         """Handle mouse wheel scrolling over browse preview image"""
         if not self.browse_folder_images:
             return
+        
+        # Clear quickmove indicators when scrolling to new image
+        self.hide_quickmove_indicators()
             
         if event.delta > 0:
             # Scroll up - previous image (don't wrap)
@@ -1796,6 +1975,8 @@ class ImageViewer:
     def on_browse_preview_scroll_up( self, event ):
         """Handle scroll up (Button-4) for browse preview"""
         if self.browse_folder_images and self.browse_image_index > 0:
+            # Clear quickmove indicators when scrolling to new image
+            self.hide_quickmove_indicators()
             self.browse_image_index -= 1
             self.current_browse_image = self.browse_folder_images[self.browse_image_index]
             self.display_image_preview( self.current_browse_image, self.browse_preview_label )
@@ -1803,6 +1984,8 @@ class ImageViewer:
     def on_browse_preview_scroll_down( self, event ):
         """Handle scroll down (Button-5) for browse preview"""
         if self.browse_folder_images and self.browse_image_index < len( self.browse_folder_images ) - 1:
+            # Clear quickmove indicators when scrolling to new image
+            self.hide_quickmove_indicators()
             self.browse_image_index += 1
             self.current_browse_image = self.browse_folder_images[self.browse_image_index]
             self.display_image_preview( self.current_browse_image, self.browse_preview_label )
@@ -1824,9 +2007,16 @@ class ImageViewer:
                 self.display_image_preview( self.database_preview_label.current_image_path, self.database_preview_label )
                 
     def on_database_preview_scroll( self, event ):
-        """Handle mouse wheel scrolling over database preview image"""
+        """Handle mouse wheel scrolling over database preview image with debouncing"""
         if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
             return
+        
+        # Skip scroll handling during performance mode
+        if self.performance_mode:
+            return
+        
+        # Clear quickmove indicators when scrolling to new image
+        self.hide_quickmove_indicators()
             
         # Get current selection and total items from virtual image list
         current_indices = list( self.virtual_image_list.selected_indices )
@@ -1852,90 +2042,88 @@ class ImageViewer:
                 new_index = current_index + 1
             else:
                 return  # Already at last image
-                
-        # Update selection in virtual image list
+        
+        # Fast update - only change internal selection and preview
         self.virtual_image_list.selected_indices = {new_index}
-        self.virtual_image_list.update_selection_display()
         
-        # Update treeview selection for proper visual feedback and thumbnail loading
-        if hasattr( self.virtual_image_list, 'treeview' ):
-            self.virtual_image_list.treeview.selection_remove(
-                self.virtual_image_list.treeview.selection()
-            )
-            item_id = str( new_index )
-            self.virtual_image_list.treeview.selection_add( item_id )
-            self.virtual_image_list.treeview.see( item_id )  # Auto-scroll to keep visible
+        
+        # Cancel any pending scroll updates
+        if hasattr( self, '_preview_scroll_after_id' ):
+            self.root.after_cancel( self._preview_scroll_after_id )
+        
+        # Schedule debounced update for heavy operations
+        self._preview_scroll_after_id = self.root.after( 50, lambda: self._update_preview_scroll_complete( new_index ) )
+        
+        # Immediately update preview without waiting - this is fast
+        if new_index < len( self.virtual_image_list.filtered_items ):
+            item_data = self.virtual_image_list.filtered_items[new_index]
+            filepath = item_data.get( 'filepath' )
+            if filepath and os.path.exists( filepath ):
+                self.current_database_image = filepath
+                self.display_image_preview( filepath, self.database_preview_label )
+    
+    def _update_preview_scroll_complete( self, new_index ):
+        """Complete the preview scroll update with heavy operations"""
+        try:
+            # Clear the after_id since we're now executing
+            if hasattr( self, '_preview_scroll_after_id' ):
+                delattr( self, '_preview_scroll_after_id' )
             
-            # Explicitly trigger thumbnail loading for newly visible items
-            if self.show_thumbnails.get():
-                self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
-                self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
-        
-        # Trigger the selection event to update preview and tags
-        self.on_virtual_selection_changed( [new_index] )
+            # Ensure the virtual_image_list.selected_indices is properly set
+            self.virtual_image_list.selected_indices = {new_index}
+            
+            # Update treeview selection (this is the slow part) - only when scrolling stops
+            if hasattr( self.virtual_image_list, 'treeview' ):
+                try:
+                    # Clear current selection
+                    current_selection = self.virtual_image_list.treeview.selection()
+                    self.virtual_image_list.treeview.selection_remove( current_selection )
+                    
+                    # Check if the item exists before trying to select it
+                    item_id = str( new_index )
+                    if self.virtual_image_list.treeview.exists( item_id ):
+                        self.virtual_image_list.treeview.selection_add( item_id )
+                        self.virtual_image_list.treeview.see( item_id )
+                except Exception as e:
+                    print( f"Error updating treeview selection: {e}" )
+            
+            # Update other UI elements
+            self.virtual_image_list.update_selection_display()
+            
+            # Load image tags and update display (defer for better performance)
+            if new_index < len( self.virtual_image_list.filtered_items ):
+                item_data = self.virtual_image_list.filtered_items[new_index]
+                filepath = item_data.get( 'filepath' )
+                if filepath:
+                    self.selected_image_files = [filepath]
+                    # Defer tag loading to prevent blocking
+                    self.root.after( 10, lambda: self._load_tags_deferred( filepath ) )
+            
+            # Update status
+            self.update_image_list_status()
+            
+        except Exception as e:
+            print( f"Error in preview scroll complete: {e}" )
+    
+    def _load_tags_deferred( self, filepath ):
+        """Load tags in a deferred manner to prevent blocking"""
+        try:
+            self.load_image_tags_for_editing()
+            self.update_file_tags_display( filepath )
+        except Exception as e:
+            print( f"Error loading tags deferred: {e}" )
         
     def on_database_preview_scroll_up( self, event ):
         """Handle scroll up (Button-4) for database preview"""
-        if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
-            return
-            
-        current_indices = list( self.virtual_image_list.selected_indices )
-        if current_indices:
-            current_index = current_indices[0]
-            if current_index > 0:
-                new_index = current_index - 1
-                
-                # Update selection in virtual image list
-                self.virtual_image_list.selected_indices = {new_index}
-                self.virtual_image_list.update_selection_display()
-                
-                # Update treeview selection
-                if hasattr( self.virtual_image_list, 'treeview' ):
-                    self.virtual_image_list.treeview.selection_remove(
-                        self.virtual_image_list.treeview.selection()
-                    )
-                    item_id = str( new_index )
-                    self.virtual_image_list.treeview.selection_add( item_id )
-                    self.virtual_image_list.treeview.see( item_id )
-                    
-                    # Explicitly trigger thumbnail loading for newly visible items
-                    if self.show_thumbnails.get():
-                        self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
-                        self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
-                
-                self.on_virtual_selection_changed( [new_index] )
+        # Use the same optimized scroll handling
+        event.delta = 1  # Simulate scroll up
+        self.on_database_preview_scroll( event )
                 
     def on_database_preview_scroll_down( self, event ):
         """Handle scroll down (Button-5) for database preview"""
-        if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
-            return
-            
-        current_indices = list( self.virtual_image_list.selected_indices )
-        total_items = len( self.virtual_image_list.filtered_items )
-        if current_indices and total_items > 0:
-            current_index = current_indices[0]
-            if current_index < total_items - 1:
-                new_index = current_index + 1
-                
-                # Update selection in virtual image list
-                self.virtual_image_list.selected_indices = {new_index}
-                self.virtual_image_list.update_selection_display()
-                
-                # Update treeview selection
-                if hasattr( self.virtual_image_list, 'treeview' ):
-                    self.virtual_image_list.treeview.selection_remove(
-                        self.virtual_image_list.treeview.selection()
-                    )
-                    item_id = str( new_index )
-                    self.virtual_image_list.treeview.selection_add( item_id )
-                    self.virtual_image_list.treeview.see( item_id )
-                    
-                    # Explicitly trigger thumbnail loading for newly visible items
-                    if self.show_thumbnails.get():
-                        self.virtual_image_list.parent.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
-                        self.virtual_image_list.parent.after( 200, self.virtual_image_list.verify_visible_thumbnails_loaded )
-                
-                self.on_virtual_selection_changed( [new_index] )
+        # Use the same optimized scroll handling
+        event.delta = -1  # Simulate scroll down
+        self.on_database_preview_scroll( event )
                 
     def apply_exif_orientation( self, image ):
         """Apply EXIF orientation to rotate image correctly"""
@@ -2102,49 +2290,87 @@ class ImageViewer:
         self.file_tags_text.configure( state=tk.DISABLED )
 
     def display_image_preview( self, filepath, label_widget ):
-        """Display image preview in the specified label widget"""
+        """Display image preview in the specified label widget with caching"""
         # Update the corresponding file path label
         if label_widget == self.browse_preview_label:
             self.browse_path_label.configure( text=filepath )
         elif label_widget == self.database_preview_label:
             self.database_path_label.configure( text=filepath )
+        
+        # Check cache first for fast display
+        cache_key = f"{filepath}_{id(label_widget)}"
+        if hasattr( self, '_preview_cache' ) and cache_key in self._preview_cache:
+            cached_photo = self._preview_cache[cache_key]
+            label_widget.configure( image=cached_photo, text="" )
+            label_widget.image = cached_photo
+            label_widget.current_image_path = filepath
+            return
             
         try:
-            image = Image.open( filepath )
-            
-            # Apply EXIF orientation correction
-            image = self.apply_exif_orientation( image )
-            
-            # Get the available space in the label widget
-            label_widget.update_idletasks()  # Ensure geometry is updated
-            available_width = label_widget.winfo_width()
-            available_height = label_widget.winfo_height()
-            
-            # Use a minimum size if the widget hasn't been sized yet
-            if available_width <= 1 or available_height <= 1:
-                available_width = 400
-                available_height = 400
-            else:
-                # Leave some padding around the image
-                available_width -= 20
-                available_height -= 20
+            # Fast image loading with size limit for performance
+            with Image.open( filepath ) as image:
+                # Get original size
+                original_width, original_height = image.size
                 
-            # Calculate the scale factor to fit the image in the available space
-            img_width, img_height = image.size
-            scale_width = available_width / img_width
-            scale_height = available_height / img_height
-            scale_factor = min( scale_width, scale_height )
-            
-            # Calculate new dimensions
-            new_width = int( img_width * scale_factor )
-            new_height = int( img_height * scale_factor )
-            
-            # Resize the image
-            resized_image = image.resize( (new_width, new_height), Image.Resampling.LANCZOS )
-            
-            photo = ImageTk.PhotoImage( resized_image )
-            label_widget.configure( image=photo, text="" )
-            label_widget.image = photo  # Keep a reference
+                # Skip very large images by loading a smaller version first
+                if original_width > 2000 or original_height > 2000:
+                    # Create a draft for faster loading of large images
+                    image.draft( 'RGB', (800, 800) )
+                
+                # Apply EXIF orientation correction (cached)
+                image = self.apply_exif_orientation( image )
+                
+                # Get the available space (use cached values when possible)
+                if hasattr( label_widget, '_cached_size' ):
+                    available_width, available_height = label_widget._cached_size
+                else:
+                    label_widget.update_idletasks()  # Only when necessary
+                    available_width = label_widget.winfo_width()
+                    available_height = label_widget.winfo_height()
+                    
+                    # Use a minimum size if the widget hasn't been sized yet
+                    if available_width <= 1 or available_height <= 1:
+                        available_width = 400
+                        available_height = 400
+                    else:
+                        # Leave some padding around the image
+                        available_width -= 20
+                        available_height -= 20
+                    
+                    # Cache the size for future use
+                    label_widget._cached_size = (available_width, available_height)
+                    
+                # Calculate the scale factor to fit the image in the available space
+                img_width, img_height = image.size
+                scale_width = available_width / img_width
+                scale_height = available_height / img_height
+                scale_factor = min( scale_width, scale_height )
+                
+                # Calculate new dimensions
+                new_width = int( img_width * scale_factor )
+                new_height = int( img_height * scale_factor )
+                
+                # Use faster resampling for better performance during scrolling
+                resample_method = Image.Resampling.BILINEAR  # Faster than LANCZOS
+                resized_image = image.resize( (new_width, new_height), resample_method )
+                
+                photo = ImageTk.PhotoImage( resized_image )
+                
+                # Cache the result
+                if not hasattr( self, '_preview_cache' ):
+                    self._preview_cache = {}
+                
+                # Limit cache size for memory management
+                if len( self._preview_cache ) > 20:  # Keep only recent previews
+                    # Remove oldest entries
+                    oldest_keys = list( self._preview_cache.keys() )[:10]
+                    for key in oldest_keys:
+                        del self._preview_cache[key]
+                
+                self._preview_cache[cache_key] = photo
+                
+                label_widget.configure( image=photo, text="" )
+                label_widget.image = photo  # Keep a reference
             label_widget.current_image_path = filepath  # Store the current image path for resize events
             
         except Exception as e:
@@ -2447,28 +2673,38 @@ class ImageViewer:
     
     def on_virtual_selection_changed( self, selected_indices ):
         """Handle selection changes in virtual image list"""
-        self.selected_image_indices = selected_indices
-        
-        # Update status label
-        self.update_image_list_status()
-        
-        if selected_indices:
-            # Get the first selected item
-            if selected_indices[0] < len( self.virtual_image_list.filtered_items ):
-                item_data = self.virtual_image_list.filtered_items[selected_indices[0]]
-                # Use the filepath directly from item_data instead of looking up by filename
-                # This fixes the duplicate filename issue
-                filepath = item_data.get( 'filepath' )
-                
-                if len( selected_indices ) == 1:
-                    # Single selection - show preview
-                    if filepath and os.path.exists( filepath ):
-                        self.current_database_image = filepath
-                        self.display_image_preview( filepath, self.database_preview_label )
-                        self.selected_image_files = [filepath]
-                        self.load_image_tags_for_editing()
-                        # Update file tags display for single selection
-                        self.update_file_tags_display( filepath )
+        try:
+            # Clear quickmove indicators when selecting new image
+            self.hide_quickmove_indicators()
+            
+            # Skip heavy operations during performance mode
+            if self.performance_mode:
+                self.selected_image_indices = selected_indices
+                self.update_image_list_status()
+                return
+            
+            self.selected_image_indices = selected_indices
+            
+            # Update status label
+            self.update_image_list_status()
+            
+            if selected_indices:
+                # Get the first selected item
+                if selected_indices[0] < len( self.virtual_image_list.filtered_items ):
+                    item_data = self.virtual_image_list.filtered_items[selected_indices[0]]
+                    # Use the filepath directly from item_data instead of looking up by filename
+                    # This fixes the duplicate filename issue
+                    filepath = item_data.get( 'filepath' )
+                    
+                    if len( selected_indices ) == 1:
+                        # Single selection - show preview
+                        if filepath and os.path.exists( filepath ):
+                            self.current_database_image = filepath
+                            self.display_image_preview( filepath, self.database_preview_label )
+                            self.selected_image_files = [filepath]
+                            self.load_image_tags_for_editing()
+                            # Update file tags display for single selection
+                            self.update_file_tags_display( filepath )
                 else:
                     # Multiple selection - show count
                     filepaths = []
@@ -2488,15 +2724,20 @@ class ImageViewer:
                     self.load_image_tags_for_editing()
                     # Clear file tags display for multiple selection
                     self.update_file_tags_display( None )
-        else:
-            # No selection
-            self.current_database_image = None
-            self.selected_image_files = []
-            self.database_preview_label.configure( image="", text="No selection" )
-            self.database_preview_label.image = None
-            self.database_path_label.configure( text="" )
-            # Clear file tags display for no selection
-            self.update_file_tags_display( None )
+            else:
+                # No selection
+                self.current_database_image = None
+                self.selected_image_files = []
+                self.database_preview_label.configure( image="", text="No selection" )
+                self.database_preview_label.image = None
+                self.database_path_label.configure( text="" )
+                # Clear file tags display for no selection
+                self.update_file_tags_display( None )
+                
+        except Exception as e:
+            print( f"Error in on_virtual_selection_changed: {e}" )
+            import traceback
+            traceback.print_exc()
     
     def on_virtual_double_click( self, index, event ):
         """Handle double click in virtual image list"""
@@ -3407,7 +3648,29 @@ class ImageViewer:
                     if index < len( self.virtual_image_list.filtered_items ):
                         filename = self.virtual_image_list.filtered_items[index]['filename']
                         preserve_selection.append( filename )
+        
+        # Check database size first to determine if we need chunked loading
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            cursor.execute( "SELECT COUNT(*) FROM images" )
+            total_images = cursor.fetchone()[0]
+            conn.close()
             
+            # Use chunked loading for large databases (>3000 images)
+            if total_images > 3000:
+                self.refresh_filtered_images_chunked( preserve_selection, total_images )
+                return
+                
+        except Exception as e:
+            print( f"Error checking database size: {e}" )
+            # Fall back to regular loading
+            
+        # Regular loading for smaller databases
+        self.refresh_filtered_images_regular( preserve_selection )
+    
+    def refresh_filtered_images_regular( self, preserve_selection ):
+        """Regular refresh for smaller databases (legacy method)"""
         try:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
@@ -3578,6 +3841,256 @@ class ImageViewer:
             
         except Exception as e:
             print( f"Error refreshing filtered images: {e}" )
+    
+    def refresh_filtered_images_chunked( self, preserve_selection, total_images ):
+        """Chunked refresh for large databases with progress feedback"""
+        # Enable performance mode for large datasets
+        self.performance_mode = True
+        
+        # Create progress dialog
+        progress_dialog = self.create_progress_dialog( "Loading Database", f"Loading {total_images:,} images..." )
+        
+        # Thread-safe data container
+        thread_data = {
+            'preserve_selection': preserve_selection,
+            'total_images': total_images,
+            'progress_dialog': progress_dialog,
+            'exception': None,
+            'completed': False,
+            'virtual_items': [],
+            'processed': 0
+        }
+        
+        # Start background loading thread
+        loading_thread = threading.Thread( target=self._chunked_loading_worker, args=(thread_data,), daemon=True )
+        loading_thread.start()
+        
+        # Start progress monitoring
+        self._schedule_chunked_progress_monitoring( thread_data, loading_thread )
+    
+    def _chunked_loading_worker( self, thread_data ):
+        """Worker thread for chunked database loading"""
+        try:
+            conn = sqlite3.connect( self.current_database_path )
+            cursor = conn.cursor()
+            
+            # Get rating filter values
+            min_rating = self.min_rating_var.get()
+            max_rating = self.max_rating_var.get()
+            
+            # Build the same query as regular method but with chunked execution
+            has_tag_filters = self.included_or_tags or self.included_and_tags or self.excluded_tags
+            has_rating_filter = min_rating > 0 or max_rating < 10
+            
+            if not has_tag_filters and not has_rating_filter:
+                # No filters - show all images with chunked loading
+                base_query = "SELECT DISTINCT i.relative_path, i.filename FROM images i ORDER BY i.filename LIMIT ? OFFSET ?"
+                base_params = []
+            else:
+                # Build filtered query
+                base_query = "SELECT DISTINCT i.relative_path, i.filename FROM images i WHERE 1=1"
+                base_params = []
+                
+                # Apply rating filter
+                if has_rating_filter:
+                    base_query += " AND i.rating >= ? AND i.rating <= ?"
+                    base_params.extend( [min_rating, max_rating] )
+                
+                # Apply EXCLUDE filter
+                if self.excluded_tags:
+                    placeholders = ','.join( ['?'] * len( self.excluded_tags ) )
+                    base_query += f" AND i.id NOT IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({placeholders}))"
+                    base_params.extend( self.excluded_tags )
+                
+                # Apply OR and AND logic
+                include_conditions = []
+                
+                if self.included_or_tags:
+                    placeholders = ','.join( ['?'] * len( self.included_or_tags ) )
+                    include_conditions.append( f"i.id IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({placeholders}))" )
+                    base_params.extend( self.included_or_tags )
+                
+                if self.included_and_tags:
+                    and_condition = f"i.id IN (SELECT it.image_id FROM image_tags it JOIN tags t ON it.tag_id = t.id WHERE t.name IN ({','.join(['?'] * len(self.included_and_tags))}) GROUP BY it.image_id HAVING COUNT(DISTINCT t.name) = ?)"
+                    include_conditions.append( and_condition )
+                    base_params.extend( self.included_and_tags )
+                    base_params.append( len( self.included_and_tags ) )
+                
+                if include_conditions:
+                    base_query += " AND (" + " OR ".join( include_conditions ) + ")"
+                
+                base_query += " ORDER BY i.filename LIMIT ? OFFSET ?"
+            
+            # Load in chunks
+            chunk_size = 1000  # Load 1000 images at a time
+            offset = 0
+            all_virtual_items = []
+            
+            while True:
+                # Check for cancellation
+                if thread_data['progress_dialog'].get( 'cancelled', False ):
+                    thread_data['exception'] = Exception( "Operation cancelled by user" )
+                    return
+                
+                # Execute chunked query
+                query_params = base_params + [chunk_size, offset]
+                cursor.execute( base_query, query_params )
+                chunk_images = cursor.fetchall()
+                
+                if not chunk_images:
+                    break  # No more data
+                
+                # Process chunk
+                for relative_path, filename in chunk_images:
+                    filepath = os.path.join( self.current_database, relative_path ) if relative_path else None
+                    all_virtual_items.append( {
+                        'filename': filename,
+                        'filepath': filepath,
+                        'show_thumbnails': self.show_thumbnails.get()
+                    } )
+                
+                # Update progress
+                thread_data['processed'] = len( all_virtual_items )
+                
+                offset += chunk_size
+                
+                # Small delay to prevent UI blocking
+                time.sleep( 0.01 )
+            
+            conn.close()
+            
+            # Store results
+            thread_data['virtual_items'] = all_virtual_items
+            thread_data['completed'] = True
+            
+        except Exception as e:
+            thread_data['exception'] = e
+    
+    def _schedule_chunked_progress_monitoring( self, thread_data, loading_thread ):
+        """Monitor chunked loading progress"""
+        self.root.after( 100, lambda: self._check_chunked_progress( thread_data, loading_thread ) )
+    
+    def _check_chunked_progress( self, thread_data, loading_thread ):
+        """Check chunked loading progress"""
+        try:
+            # Update progress
+            processed = thread_data.get( 'processed', 0 )
+            total = thread_data['total_images']
+            
+            self.update_progress_dialog( 
+                thread_data['progress_dialog'], 
+                processed, 
+                total, 
+                f"Loaded {processed:,}/{total:,} images" 
+            )
+            
+            # Check if still running
+            if loading_thread.is_alive() and not thread_data['progress_dialog'].get( 'cancelled', False ):
+                # Schedule next check
+                self.root.after( 100, lambda: self._check_chunked_progress( thread_data, loading_thread ) )
+            else:
+                # Finalize
+                self._finalize_chunked_loading( thread_data )
+                
+        except Exception as e:
+            print( f"Error in chunked progress monitoring: {e}" )
+            self._finalize_chunked_loading( thread_data )
+    
+    def _finalize_chunked_loading( self, thread_data ):
+        """Finalize chunked loading operation"""
+        try:
+            # Close progress dialog
+            self.close_progress_dialog( thread_data['progress_dialog'] )
+            
+            # Handle any exceptions
+            if thread_data.get( 'exception' ):
+                if "cancelled" not in str( thread_data['exception'] ).lower():
+                    messagebox.showerror( "Error", f"Failed to load database: {thread_data['exception']}" )
+                return
+            
+            # Apply results to UI (on main thread)
+            if thread_data.get( 'completed' ) and thread_data.get( 'virtual_items' ):
+                virtual_items = thread_data['virtual_items']
+                preserve_selection = thread_data['preserve_selection']
+                
+                # Clear and populate the virtual image list
+                self.clear_image_list()
+                self.virtual_image_list.set_items( virtual_items )
+                
+                # Defer sorting and other operations until UI is ready
+                self.root.after( 100, lambda: self._finalize_chunked_ui_operations( virtual_items, preserve_selection ) )
+                    
+        except Exception as e:
+            print( f"Error finalizing chunked loading: {e}" )
+            messagebox.showerror( "Error", f"Failed to finalize database loading: {str(e)}" )
+    
+    def _finalize_chunked_ui_operations( self, virtual_items, preserve_selection ):
+        """Finalize UI operations after chunked loading completes"""
+        try:
+            # Apply current sorting if we have items (deferred to prevent UI blocking)
+            if virtual_items and hasattr( self, 'sort_criteria_var' ):
+                self.apply_sorting_internal()
+            
+            # Update status label
+            self.update_image_list_status()
+            
+            # Handle selection restoration
+            if preserve_selection:
+                self._restore_selection_after_chunked_load( virtual_items, preserve_selection )
+            
+            # Disable performance mode after a delay to allow UI to settle
+            self.root.after( 1000, self._disable_performance_mode )
+            
+            # Start thumbnail loading if enabled (heavily deferred for large datasets)
+            if self.show_thumbnails.get():
+                # Use the TreeviewImageList's thumbnail system with longer delay
+                self.root.after( 2000, lambda: self.virtual_image_list.load_initial_visible_thumbnails() )
+                
+        except Exception as e:
+            print( f"Error in deferred UI operations: {e}" )
+    
+    def _disable_performance_mode( self ):
+        """Disable performance mode after operations complete"""
+        self.performance_mode = False
+        print( "Performance mode disabled - full functionality restored" )
+    
+    def _restore_selection_after_chunked_load( self, virtual_items, preserve_selection ):
+        """Restore selection after chunked loading"""
+        try:
+            # Find preserved items in new list
+            restored_indices = []
+            for i, item in enumerate( virtual_items ):
+                if item['filename'] in preserve_selection:
+                    restored_indices.append( i )
+            
+            if restored_indices:
+                # Restore selection in virtual list
+                self.virtual_image_list.selected_indices = set( restored_indices )
+                self.virtual_image_list.update_selection_display()
+                
+                # Update treeview selection
+                if hasattr( self.virtual_image_list, 'treeview' ):
+                    self.virtual_image_list.treeview.selection_remove(
+                        self.virtual_image_list.treeview.selection()
+                    )
+                    for index in restored_indices:
+                        if 0 <= index < len( virtual_items ):
+                            item_id = str( index )
+                            self.virtual_image_list.treeview.selection_add( item_id )
+                
+                # Trigger selection callback
+                self.on_virtual_selection_changed( restored_indices )
+            else:
+                # Select first item if no preserved selection found
+                if virtual_items:
+                    self.virtual_image_list.selected_indices = {0}
+                    self.virtual_image_list.update_selection_display()
+                    if hasattr( self.virtual_image_list, 'treeview' ):
+                        self.virtual_image_list.treeview.selection_add( "0" )
+                    self.on_virtual_selection_changed( [0] )
+                    
+        except Exception as e:
+            print( f"Error restoring selection: {e}" )
             
     def on_database_image_select( self, event ):
         """Handle selection in database image list"""
@@ -4530,7 +5043,15 @@ class ImageViewer:
         
         # Update the virtual image list with sorted items
         self.virtual_image_list.filtered_items = items
-        self.virtual_image_list.refresh_treeview()
+        
+        # Use chunked refresh for large datasets
+        if len( items ) > 1000:
+            # For large datasets, clear the treeview and start chunked refresh
+            for item in self.virtual_image_list.treeview.get_children():
+                self.virtual_image_list.treeview.delete( item )
+            self.virtual_image_list.refresh_treeview_chunked()
+        else:
+            self.virtual_image_list.refresh_treeview()
         
         # Restore selection
         if current_selection:
@@ -4602,7 +5123,15 @@ class ImageViewer:
         
         # Update the virtual image list with sorted items
         self.virtual_image_list.filtered_items = items
-        self.virtual_image_list.refresh_treeview()
+        
+        # Use chunked refresh for large datasets (internal sorting)
+        if len( items ) > 1000:
+            # For large datasets, clear the treeview and start chunked refresh
+            for item in self.virtual_image_list.treeview.get_children():
+                self.virtual_image_list.treeview.delete( item )
+            self.virtual_image_list.refresh_treeview_chunked()
+        else:
+            self.virtual_image_list.refresh_treeview()
         
         # Update sort status
         if criteria == "random":
@@ -5871,16 +6400,47 @@ class ImageViewer:
             
     def on_closing( self ):
         """Handle application closing"""
-        # Save current directory and all state before closing
-        if self.current_browse_directory:
-            self.save_current_directory( self.current_browse_directory )
-        elif hasattr( self, 'drive_var' ) and self.drive_var.get():
-            self.save_current_directory( self.drive_var.get() )
-        else:
-            # If no directory to save, still save other state (window, paned positions, active tab)
-            self.save_paned_positions_only()
-        
-        self.root.destroy()
+        try:
+            # Cancel any ongoing chunked operations
+            if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+                if hasattr( self.virtual_image_list, 'chunked_refresh_data' ):
+                    print( "Cancelling chunked refresh operation..." )
+                    delattr( self.virtual_image_list, 'chunked_refresh_data' )
+            
+            # Cancel any pending thumbnail operations
+            if hasattr( self, 'visibility_check_timer' ) and self.visibility_check_timer:
+                self.root.after_cancel( self.visibility_check_timer )
+                self.visibility_check_timer = None
+            
+            # Cancel any pending after() calls in TreeviewImageList
+            if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+                try:
+                    # Cancel any pending operations
+                    for attr_name in dir( self.virtual_image_list ):
+                        if attr_name.endswith( '_timer' ) or attr_name.endswith( '_after_id' ):
+                            after_id = getattr( self.virtual_image_list, attr_name, None )
+                            if after_id:
+                                try:
+                                    self.root.after_cancel( after_id )
+                                except:
+                                    pass  # Ignore cancellation errors
+                except Exception:
+                    pass  # Ignore cleanup errors
+            
+            # Save current directory and all state before closing
+            if self.current_browse_directory:
+                self.save_current_directory( self.current_browse_directory )
+            elif hasattr( self, 'drive_var' ) and self.drive_var.get():
+                self.save_current_directory( self.drive_var.get() )
+            else:
+                # If no directory to save, still save other state (window, paned positions, active tab)
+                self.save_paned_positions_only()
+            
+        except Exception as e:
+            print( f"Error during cleanup: {e}" )
+        finally:
+            # Force destroy even if cleanup fails
+            self.root.destroy()
 
     # Rating methods for keyboard shortcuts
     def rate_current_browse_image( self, rating ):
@@ -6093,6 +6653,138 @@ class ImageViewer:
         adjust_method()
         # Schedule next repeat
         self._rating_repeat_timer = self.root.after( 500, self._rating_repeat, adjust_method )
+    
+    # Quickmove functionality
+    def on_quickmove_toggle( self ):
+        """Handle Quickmove checkbox toggle"""
+        if self.quickmove_enabled.get():
+            # Show the path frame
+            self.browse_quickmove_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
+            self.database_quickmove_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
+            # Hide indicators initially
+            self.browse_quickmove_indicator.pack_forget()
+            self.database_quickmove_indicator.pack_forget()
+        else:
+            # Hide the path frame
+            self.browse_quickmove_path_frame.pack_forget()
+            self.database_quickmove_path_frame.pack_forget()
+        
+        # Save settings
+        self.save_quickmove_settings()
+    
+    def browse_quickmove_folder( self ):
+        """Browse for Quickmove destination folder"""
+        folder = filedialog.askdirectory( title="Select Quickmove Destination Folder" )
+        if folder:
+            self.quickmove_path.set( folder )
+            self.save_quickmove_settings()
+    
+    def quickmove_current_image( self ):
+        """Copy the current preview image to the Quickmove folder"""
+        if not self.quickmove_enabled.get():
+            return "break"
+        
+        quickmove_folder = self.quickmove_path.get().strip()
+        if not quickmove_folder or not os.path.exists( quickmove_folder ):
+            messagebox.showerror( "Quickmove Error", "Please select a valid destination folder." )
+            return "break"
+        
+        # Determine which image is currently being previewed
+        current_image = None
+        current_tab = self.notebook.tab( self.notebook.select(), "text" )
+        
+        if current_tab == "Browse":
+            current_image = self.current_browse_image
+        elif current_tab == "Database":
+            current_image = self.current_database_image
+        
+        if not current_image or not os.path.exists( current_image ):
+            messagebox.showwarning( "Quickmove", "No image selected or image file not found." )
+            return "break"
+        
+        try:
+            filename = os.path.basename( current_image )
+            destination = os.path.join( quickmove_folder, filename )
+            
+            # Check if file already exists
+            file_exists = os.path.exists( destination )
+            
+            # Copy the file (overwrite if exists)
+            shutil.copy2( current_image, destination )
+            
+            # Show appropriate indicator based on whether file existed
+            if file_exists:
+                self.show_quickmove_overwrite()  # Orange dot
+            else:
+                self.show_quickmove_success()    # Green dot
+            
+        except Exception as e:
+            messagebox.showerror( "Quickmove Error", f"Failed to copy file:\n{str(e)}" )
+        
+        return "break"
+    
+    def show_quickmove_success( self ):
+        """Show green dot indicator for successful quickmove"""
+        current_tab = self.notebook.tab( self.notebook.select(), "text" )
+        
+        if current_tab == "Browse":
+            self.browse_quickmove_indicator.configure( foreground="green" )
+            self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        elif current_tab == "Database":
+            self.database_quickmove_indicator.configure( foreground="green" )
+            self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+    
+    def show_quickmove_overwrite( self ):
+        """Show orange dot indicator for quickmove overwrite"""
+        current_tab = self.notebook.tab( self.notebook.select(), "text" )
+        
+        if current_tab == "Browse":
+            self.browse_quickmove_indicator.configure( foreground="orange" )
+            self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        elif current_tab == "Database":
+            self.database_quickmove_indicator.configure( foreground="orange" )
+            self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+    
+    def hide_quickmove_indicators( self ):
+        """Hide green dot indicators"""
+        try:
+            self.browse_quickmove_indicator.pack_forget()
+            self.database_quickmove_indicator.pack_forget()
+        except:
+            pass  # Ignore errors if widgets don't exist
+    
+    def save_quickmove_settings( self ):
+        """Save Quickmove settings to file"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            settings['quickmove_enabled'] = self.quickmove_enabled.get()
+            settings['quickmove_path'] = self.quickmove_path.get()
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+                
+        except Exception as e:
+            print( f"Error saving Quickmove settings: {e}" )
+    
+    def load_quickmove_settings( self ):
+        """Load Quickmove settings from file"""
+        try:
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    
+                self.quickmove_enabled.set( settings.get( 'quickmove_enabled', False ) )
+                self.quickmove_path.set( settings.get( 'quickmove_path', "" ) )
+                
+                # Update UI visibility
+                self.on_quickmove_toggle()
+                
+        except Exception as e:
+            print( f"Error loading Quickmove settings: {e}" )
 
 class TagDialog:
     def __init__( self, parent, filepath, database_path ):
