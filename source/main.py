@@ -2102,6 +2102,10 @@ class ImageViewer:
             # Update status
             self.update_image_list_status()
             
+            # Trigger thumbnail loading for visible items after scrolling
+            if self.show_thumbnails.get() and hasattr( self.virtual_image_list, 'load_visible_thumbnails_debounced' ):
+                self.root.after( 50, self.virtual_image_list.load_visible_thumbnails_debounced )
+            
         except Exception as e:
             print( f"Error in preview scroll complete: {e}" )
     
