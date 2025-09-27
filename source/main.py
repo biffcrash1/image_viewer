@@ -1042,27 +1042,44 @@ class ImageViewer:
         self.browse_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
         self.browse_path_label.pack( pady=(0, 5) )
         
-        # Quickmove controls for browse tab
-        self.browse_quickmove_frame = ttk.Frame( left_frame )
-        self.browse_quickmove_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
+        # Quickcopy controls for browse tab
+        self.browse_quickcopy_frame = ttk.Frame( left_frame )
+        self.browse_quickcopy_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
         
-        self.browse_quickmove_check = ttk.Checkbutton( self.browse_quickmove_frame, text="Quickmove", 
+        # Top row: Checkbox and Copy button
+        self.browse_quickcopy_top_frame = ttk.Frame( self.browse_quickcopy_frame )
+        self.browse_quickcopy_top_frame.pack( fill=tk.X, pady=(0, 2) )
+        
+        self.browse_quickcopy_check = ttk.Checkbutton( self.browse_quickcopy_top_frame, text="Quickcopy", 
                                                       variable=self.quickmove_enabled,
                                                       command=self.on_quickmove_toggle )
-        self.browse_quickmove_check.pack( side=tk.LEFT, padx=(0, 5) )
+        self.browse_quickcopy_check.pack( side=tk.LEFT, padx=(0, 10) )
         
-        self.browse_quickmove_path_frame = ttk.Frame( self.browse_quickmove_frame )
+        self.browse_quickcopy_button = ttk.Button( self.browse_quickcopy_top_frame, text="Copy to folder", 
+                                                  command=self.quickmove_current_image )
+        self.browse_quickcopy_button.pack( side=tk.LEFT, padx=(0, 5) )
         
-        self.browse_quickmove_entry = ttk.Entry( self.browse_quickmove_path_frame, textvariable=self.quickmove_path, width=30 )
-        self.browse_quickmove_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        # Middle row: Path field with Browse button and indicator
+        self.browse_quickcopy_path_frame = ttk.Frame( self.browse_quickcopy_frame )
         
-        self.browse_quickmove_browse_btn = ttk.Button( self.browse_quickmove_path_frame, text="Browse", 
+        self.browse_quickcopy_entry = ttk.Entry( self.browse_quickcopy_path_frame, textvariable=self.quickmove_path, width=30 )
+        self.browse_quickcopy_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        
+        self.browse_quickcopy_browse_btn = ttk.Button( self.browse_quickcopy_path_frame, text="Browse", 
                                                       command=self.browse_quickmove_folder )
-        self.browse_quickmove_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
+        self.browse_quickcopy_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
         
-        self.browse_quickmove_indicator = ttk.Label( self.browse_quickmove_path_frame, text="●", 
+        self.browse_quickcopy_indicator = ttk.Label( self.browse_quickcopy_path_frame, text="●", 
                                                     foreground="green", font=('TkDefaultFont', 12) )
-        self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        self.browse_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        
+        # Bottom row: Help text
+        self.browse_quickcopy_help_frame = ttk.Frame( self.browse_quickcopy_frame )
+        self.browse_quickcopy_help_frame.pack( fill=tk.X, pady=(2, 0) )
+        
+        self.browse_quickcopy_help = ttk.Label( self.browse_quickcopy_help_frame, text="Press 'q' to copy current image to folder", 
+                                               font=('TkDefaultFont', 8), foreground='gray' )
+        self.browse_quickcopy_help.pack( side=tk.LEFT )
         
         self.browse_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.browse_preview_label.pack( fill=tk.BOTH, expand=True )
@@ -1105,6 +1122,10 @@ class ImageViewer:
         self.browse_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
         self.browse_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
         self.browse_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
+        
+        # Add up/down arrow keys for image navigation
+        self.browse_preview_label.bind( "<Key-Up>", lambda e: self.on_browse_preview_scroll_up( e ) )
+        self.browse_preview_label.bind( "<Key-Down>", lambda e: self.on_browse_preview_scroll_down( e ) )
         
         # Add Quickmove shortcut for browse preview
         self.browse_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
@@ -1190,27 +1211,44 @@ class ImageViewer:
         self.database_path_label = ttk.Label( left_frame, text="", font=('TkDefaultFont', 8), foreground='gray', wraplength=400 )
         self.database_path_label.pack( pady=(0, 5) )
         
-        # Quickmove controls for database tab
-        self.database_quickmove_frame = ttk.Frame( left_frame )
-        self.database_quickmove_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
+        # Quickcopy controls for database tab
+        self.database_quickcopy_frame = ttk.Frame( left_frame )
+        self.database_quickcopy_frame.pack( fill=tk.X, padx=5, pady=(0, 5) )
         
-        self.database_quickmove_check = ttk.Checkbutton( self.database_quickmove_frame, text="Quickmove", 
+        # Top row: Checkbox and Copy button
+        self.database_quickcopy_top_frame = ttk.Frame( self.database_quickcopy_frame )
+        self.database_quickcopy_top_frame.pack( fill=tk.X, pady=(0, 2) )
+        
+        self.database_quickcopy_check = ttk.Checkbutton( self.database_quickcopy_top_frame, text="Quickcopy", 
                                                         variable=self.quickmove_enabled,
                                                         command=self.on_quickmove_toggle )
-        self.database_quickmove_check.pack( side=tk.LEFT, padx=(0, 5) )
+        self.database_quickcopy_check.pack( side=tk.LEFT, padx=(0, 10) )
         
-        self.database_quickmove_path_frame = ttk.Frame( self.database_quickmove_frame )
+        self.database_quickcopy_button = ttk.Button( self.database_quickcopy_top_frame, text="Copy to folder", 
+                                                    command=self.quickmove_current_image )
+        self.database_quickcopy_button.pack( side=tk.LEFT, padx=(0, 5) )
         
-        self.database_quickmove_entry = ttk.Entry( self.database_quickmove_path_frame, textvariable=self.quickmove_path, width=30 )
-        self.database_quickmove_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        # Middle row: Path field with Browse button and indicator
+        self.database_quickcopy_path_frame = ttk.Frame( self.database_quickcopy_frame )
         
-        self.database_quickmove_browse_btn = ttk.Button( self.database_quickmove_path_frame, text="Browse", 
+        self.database_quickcopy_entry = ttk.Entry( self.database_quickcopy_path_frame, textvariable=self.quickmove_path, width=30 )
+        self.database_quickcopy_entry.pack( side=tk.LEFT, padx=(0, 5), fill=tk.X, expand=True )
+        
+        self.database_quickcopy_browse_btn = ttk.Button( self.database_quickcopy_path_frame, text="Browse", 
                                                         command=self.browse_quickmove_folder )
-        self.database_quickmove_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
+        self.database_quickcopy_browse_btn.pack( side=tk.RIGHT, padx=(5, 0) )
         
-        self.database_quickmove_indicator = ttk.Label( self.database_quickmove_path_frame, text="●", 
+        self.database_quickcopy_indicator = ttk.Label( self.database_quickcopy_path_frame, text="●", 
                                                       foreground="green", font=('TkDefaultFont', 12) )
-        self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        self.database_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+        
+        # Bottom row: Help text
+        self.database_quickcopy_help_frame = ttk.Frame( self.database_quickcopy_frame )
+        self.database_quickcopy_help_frame.pack( fill=tk.X, pady=(2, 0) )
+        
+        self.database_quickcopy_help = ttk.Label( self.database_quickcopy_help_frame, text="Press 'q' to copy current image to folder", 
+                                                 font=('TkDefaultFont', 8), foreground='gray' )
+        self.database_quickcopy_help.pack( side=tk.LEFT )
         
         self.database_preview_label = ttk.Label( left_frame, text="No image selected" )
         self.database_preview_label.pack( fill=tk.BOTH, expand=True )
@@ -1272,6 +1310,10 @@ class ImageViewer:
         self.database_preview_label.bind( "<KeyRelease-Left>", self.on_rating_arrow_release )
         self.database_preview_label.bind( "<KeyPress-Right>", self.on_rating_arrow_press )
         self.database_preview_label.bind( "<KeyRelease-Right>", self.on_rating_arrow_release )
+        
+        # Add up/down arrow keys for image navigation
+        self.database_preview_label.bind( "<Key-Up>", lambda e: self.on_database_preview_scroll_up( e ) )
+        self.database_preview_label.bind( "<Key-Down>", lambda e: self.on_database_preview_scroll_down( e ) )
         
         # Add Quickmove shortcut for database preview
         self.database_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
@@ -6660,18 +6702,26 @@ class ImageViewer:
     
     # Quickmove functionality
     def on_quickmove_toggle( self ):
-        """Handle Quickmove checkbox toggle"""
+        """Handle Quickcopy checkbox toggle"""
         if self.quickmove_enabled.get():
-            # Show the path frame
-            self.browse_quickmove_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
-            self.database_quickmove_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
+            # Show the copy button, path frame, and help text
+            self.browse_quickcopy_button.pack( side=tk.LEFT, padx=(0, 5) )
+            self.database_quickcopy_button.pack( side=tk.LEFT, padx=(0, 5) )
+            self.browse_quickcopy_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
+            self.database_quickcopy_path_frame.pack( side=tk.LEFT, fill=tk.X, expand=True )
+            self.browse_quickcopy_help_frame.pack( fill=tk.X, pady=(2, 0) )
+            self.database_quickcopy_help_frame.pack( fill=tk.X, pady=(2, 0) )
             # Hide indicators initially
-            self.browse_quickmove_indicator.pack_forget()
-            self.database_quickmove_indicator.pack_forget()
+            self.browse_quickcopy_indicator.pack_forget()
+            self.database_quickcopy_indicator.pack_forget()
         else:
-            # Hide the path frame
-            self.browse_quickmove_path_frame.pack_forget()
-            self.database_quickmove_path_frame.pack_forget()
+            # Hide the copy button, path frame, and help text
+            self.browse_quickcopy_button.pack_forget()
+            self.database_quickcopy_button.pack_forget()
+            self.browse_quickcopy_path_frame.pack_forget()
+            self.database_quickcopy_path_frame.pack_forget()
+            self.browse_quickcopy_help_frame.pack_forget()
+            self.database_quickcopy_help_frame.pack_forget()
         
         # Save settings
         self.save_quickmove_settings()
@@ -6728,32 +6778,32 @@ class ImageViewer:
         return "break"
     
     def show_quickmove_success( self ):
-        """Show green dot indicator for successful quickmove"""
+        """Show green dot indicator for successful quickcopy"""
         current_tab = self.notebook.tab( self.notebook.select(), "text" )
         
         if current_tab == "Browse":
-            self.browse_quickmove_indicator.configure( foreground="green" )
-            self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+            self.browse_quickcopy_indicator.configure( foreground="green" )
+            self.browse_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
         elif current_tab == "Database":
-            self.database_quickmove_indicator.configure( foreground="green" )
-            self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+            self.database_quickcopy_indicator.configure( foreground="green" )
+            self.database_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
     
     def show_quickmove_overwrite( self ):
-        """Show orange dot indicator for quickmove overwrite"""
+        """Show orange dot indicator for quickcopy overwrite"""
         current_tab = self.notebook.tab( self.notebook.select(), "text" )
         
         if current_tab == "Browse":
-            self.browse_quickmove_indicator.configure( foreground="orange" )
-            self.browse_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+            self.browse_quickcopy_indicator.configure( foreground="orange" )
+            self.browse_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
         elif current_tab == "Database":
-            self.database_quickmove_indicator.configure( foreground="orange" )
-            self.database_quickmove_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
+            self.database_quickcopy_indicator.configure( foreground="orange" )
+            self.database_quickcopy_indicator.pack( side=tk.RIGHT, padx=(5, 0) )
     
     def hide_quickmove_indicators( self ):
-        """Hide green dot indicators"""
+        """Hide indicators"""
         try:
-            self.browse_quickmove_indicator.pack_forget()
-            self.database_quickmove_indicator.pack_forget()
+            self.browse_quickcopy_indicator.pack_forget()
+            self.database_quickcopy_indicator.pack_forget()
         except:
             pass  # Ignore errors if widgets don't exist
     
