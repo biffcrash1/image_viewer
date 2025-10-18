@@ -2102,6 +2102,7 @@ class ImageViewer:
             filepath = item_data.get( 'filepath' )
             if filepath and os.path.exists( filepath ):
                 self.current_database_image = filepath
+                self.selected_image_files = [filepath]  # Update immediately so rating shortcuts work
                 self.display_image_preview( filepath, self.database_preview_label )
     
     def _update_preview_scroll_complete( self, new_index ):
@@ -2650,7 +2651,7 @@ class ImageViewer:
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
-                    relative_path TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
                     width INTEGER,
                     height INTEGER,
                     rating INTEGER DEFAULT 0,
@@ -2828,7 +2829,7 @@ class ImageViewer:
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
-                    relative_path TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
                     width INTEGER,
                     height INTEGER,
                     rating INTEGER DEFAULT 0,
@@ -2895,7 +2896,7 @@ class ImageViewer:
                 CREATE TABLE IF NOT EXISTS images (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     filename TEXT NOT NULL,
-                    relative_path TEXT NOT NULL,
+                    relative_path TEXT NOT NULL UNIQUE,
                     width INTEGER,
                     height INTEGER,
                     rating INTEGER DEFAULT 0,
@@ -2947,9 +2948,9 @@ class ImageViewer:
                         # Calculate relative path
                         relative_path = os.path.relpath( filepath, directory )
                         
-                        # Insert into database
+                        # Insert into database (or replace if duplicate relative_path exists)
                         cursor.execute( '''
-                            INSERT INTO images (filename, relative_path, width, height)
+                            INSERT OR REPLACE INTO images (filename, relative_path, width, height)
                             VALUES (?, ?, ?, ?)
                         ''', (file, relative_path, width, height) )
                         
@@ -3044,9 +3045,9 @@ class ImageViewer:
                 # Process batch when it reaches batch_size or at the end
                 if len( batch_data ) >= batch_size or processed == total_files:
                     if batch_data:
-                        # Batch insert for better performance
+                        # Batch insert for better performance (or replace if duplicate relative_path exists)
                         cursor.executemany( '''
-                            INSERT INTO images (filename, relative_path, width, height)
+                            INSERT OR REPLACE INTO images (filename, relative_path, width, height)
                             VALUES (?, ?, ?, ?)
                         ''', batch_data )
                         
@@ -3361,10 +3362,10 @@ class ImageViewer:
                             except Exception as e:
                                 print( f"Error processing {filepath}: {e}" )
                                 
-            # Batch insert new images
+            # Batch insert new images (or replace if duplicate relative_path exists)
             if new_images_batch:
                 cursor.executemany( '''
-                    INSERT INTO images (filename, relative_path, width, height)
+                    INSERT OR REPLACE INTO images (filename, relative_path, width, height)
                     VALUES (?, ?, ?, ?)
                 ''', new_images_batch )
                                 
@@ -6260,9 +6261,11 @@ class ImageViewer:
             conn = sqlite3.connect( self.current_database_path )
             cursor = conn.cursor()
             
-            # Get image basic info
-            relative_path = os.path.relpath( filepath, self.current_database )
-            cursor.execute( "SELECT id, rating, width, height FROM images WHERE relative_path = ? ORDER BY id DESC", (relative_path,) )
+            # Get image basic info - use same query logic as rating to ensure consistency
+            relative_path = os.path.relpath( filepath, os.path.dirname( self.current_database_path ) )
+            filename = os.path.basename( filepath )
+            
+            cursor.execute( "SELECT id, rating, width, height FROM images WHERE filename = ? OR relative_path = ? ORDER BY id DESC", (filename, relative_path) )
             result = cursor.fetchone()  # This will get the highest (most recent) ID
             
             if not result:
@@ -6566,8 +6569,8 @@ class ImageViewer:
             relative_path = os.path.relpath( image_path, os.path.dirname( self.current_database_path ) )
             filename = os.path.basename( image_path )
             
-            # Check if image exists in database
-            cursor.execute( "SELECT id FROM images WHERE filename = ? OR relative_path = ?", (filename, relative_path) )
+            # Check if image exists in database (use ORDER BY id DESC to get most recent entry)
+            cursor.execute( "SELECT id FROM images WHERE filename = ? OR relative_path = ? ORDER BY id DESC", (filename, relative_path) )
             result = cursor.fetchone()
             
             if result:
@@ -6584,7 +6587,7 @@ class ImageViewer:
                     width, height = image.size
                     image.close()
                     
-                    cursor.execute( "INSERT INTO images (filename, relative_path, width, height, rating) VALUES (?, ?, ?, ?, ?)",
+                    cursor.execute( "INSERT OR REPLACE INTO images (filename, relative_path, width, height, rating) VALUES (?, ?, ?, ?, ?)",
                                   (filename, relative_path, width, height, rating) )
                 except Exception as e:
                     print( f"Error adding image to database: {e}" )
