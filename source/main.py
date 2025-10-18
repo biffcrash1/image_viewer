@@ -952,6 +952,7 @@ class ImageViewer:
         
         # Options settings
         self.show_thumbnails = tk.BooleanVar( value=False )  # Default to no thumbnails
+        self.confirm_before_delete = tk.BooleanVar( value=True )  # Default to confirm before delete
         self.thumbnail_cache = {}  # Cache for 64x64 thumbnails
         self.thumbnail_load_queue = []  # Queue of items waiting for thumbnail loading
         self.thumbnail_loading = False  # Flag to prevent concurrent loading
@@ -969,6 +970,7 @@ class ImageViewer:
         self.setup_database_menu()
         self.load_settings()
         self.load_quickmove_settings()
+        self.load_confirm_delete_setting()
         
         # Restore window geometry and active tab after everything is set up
         self.root.after( 100, self.restore_window_geometry )
@@ -1012,6 +1014,7 @@ class ImageViewer:
         database_menu.add_command( label="Rescan", command=self.rescan_database )
         database_menu.add_separator()
         database_menu.add_command( label="Remove Duplicates from Database", command=self.remove_database_duplicates )
+        database_menu.add_command( label="Clean Up Database", command=self.clean_up_database )
         
         # Options menu
         options_menu = tk.Menu( menubar, tearoff=0 )
@@ -1019,6 +1022,8 @@ class ImageViewer:
         
         options_menu.add_checkbutton( label="Show Thumbnails", variable=self.show_thumbnails, 
                                     command=self.on_thumbnails_toggle )
+        options_menu.add_checkbutton( label="Confirm Before Delete", variable=self.confirm_before_delete,
+                                    command=self.on_confirm_delete_toggle )
         
         # Help menu
         help_menu = tk.Menu( menubar, tearoff=0 )
@@ -1116,6 +1121,9 @@ class ImageViewer:
         self.browse_preview_label.bind( "<Key-8>", lambda e: self.rate_current_browse_image( 8 ) )
         self.browse_preview_label.bind( "<Key-9>", lambda e: self.rate_current_browse_image( 9 ) )
         self.browse_preview_label.bind( "<Key-0>", lambda e: self.rate_current_browse_image( 10 ) )
+        self.browse_preview_label.bind( "<Key-a>", lambda e: self.rate_current_browse_image( 2 ) )
+        self.browse_preview_label.bind( "<Key-s>", lambda e: self.rate_current_browse_image( 5 ) )
+        self.browse_preview_label.bind( "<Key-d>", lambda e: self.rate_current_browse_image( 8 ) )
         self.browse_preview_label.bind( "<Key-Left>", lambda e: self.adjust_current_browse_rating( -1 ) )
         self.browse_preview_label.bind( "<Key-Right>", lambda e: self.adjust_current_browse_rating( 1 ) )
         self.browse_preview_label.bind( "<KeyPress-Left>", self.on_rating_arrow_press )
@@ -1129,6 +1137,9 @@ class ImageViewer:
         
         # Add Quickmove shortcut for browse preview
         self.browse_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
+        
+        # Add delete key binding for browse preview
+        self.browse_preview_label.bind( "<Delete>", lambda e: self.delete_current_browse_image() )
         
         # Right column - Directory tree
         right_frame = ttk.Frame( paned )
@@ -1285,6 +1296,9 @@ class ImageViewer:
         self.database_preview_label.bind( "<Key-8>", lambda e: self.rate_current_database_image( 8 ) )
         self.database_preview_label.bind( "<Key-9>", lambda e: self.rate_current_database_image( 9 ) )
         self.database_preview_label.bind( "<Key-0>", lambda e: self.rate_current_database_image( 10 ) )
+        self.database_preview_label.bind( "<Key-a>", lambda e: self.rate_current_database_image( 2 ) )
+        self.database_preview_label.bind( "<Key-s>", lambda e: self.rate_current_database_image( 5 ) )
+        self.database_preview_label.bind( "<Key-d>", lambda e: self.rate_current_database_image( 8 ) )
         
         # Add global keyboard rating shortcuts that work from anywhere in the database tab
         def handle_global_rating( event, rating ):
@@ -1304,6 +1318,9 @@ class ImageViewer:
         self.root.bind_all( "<Key-8>", lambda e: handle_global_rating( e, 8 ) )
         self.root.bind_all( "<Key-9>", lambda e: handle_global_rating( e, 9 ) )
         self.root.bind_all( "<Key-0>", lambda e: handle_global_rating( e, 10 ) )
+        self.root.bind_all( "<Key-a>", lambda e: handle_global_rating( e, 2 ) )
+        self.root.bind_all( "<Key-s>", lambda e: handle_global_rating( e, 5 ) )
+        self.root.bind_all( "<Key-d>", lambda e: handle_global_rating( e, 8 ) )
         self.database_preview_label.bind( "<Key-Left>", lambda e: self.adjust_current_database_rating( -1 ) )
         self.database_preview_label.bind( "<Key-Right>", lambda e: self.adjust_current_database_rating( 1 ) )
         self.database_preview_label.bind( "<KeyPress-Left>", self.on_rating_arrow_press )
@@ -1317,6 +1334,9 @@ class ImageViewer:
         
         # Add Quickmove shortcut for database preview
         self.database_preview_label.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
+        
+        # Add delete key binding for database preview
+        self.database_preview_label.bind( "<Delete>", lambda e: self.delete_current_database_image() )
         
         # Right column - Tag filters and image list
         right_frame = ttk.Frame( paned )
@@ -1392,6 +1412,8 @@ class ImageViewer:
         rating_frame.pack( side=tk.BOTTOM, fill=tk.X, padx=5, pady=2 )
         
         ttk.Label( rating_frame, text="Rating:" ).pack( anchor=tk.W )
+        ttk.Label( rating_frame, text="Shortcuts: 1-9,0 or A=2, S=5, D=8", 
+                  font=('TkDefaultFont', 8), foreground='gray' ).pack( anchor=tk.W )
         self.image_rating_var = tk.IntVar( value=0 )
         self.image_rating_scale = tk.Scale( rating_frame, from_=0, to=10, orient=tk.HORIZONTAL, 
                                            variable=self.image_rating_var, 
@@ -1606,7 +1628,13 @@ class ImageViewer:
             total_images = len( self.virtual_image_list.filtered_items )
             selected_count = len( self.virtual_image_list.selected_indices )
             
-            status_text = f"{total_images} total items, {selected_count} selected"
+            # Show current index for single selection, or selection count for multiple
+            if selected_count == 1:
+                current_index = list( self.virtual_image_list.selected_indices )[0] + 1  # 1-based for display
+                status_text = f"{current_index}/{total_images} total items"
+            else:
+                status_text = f"{total_images} total items, {selected_count} selected"
+            
             self.image_list_status_label.configure( text=status_text )
             
     def debug_virtual_scrolling( self ):
@@ -1995,6 +2023,10 @@ class ImageViewer:
             
     def on_browse_preview_scroll( self, event ):
         """Handle mouse wheel scrolling over browse preview image"""
+        # Only process scroll if the application has focus
+        if not self.root.focus_displayof():
+            return
+            
         if not self.browse_folder_images:
             return
         
@@ -2050,6 +2082,10 @@ class ImageViewer:
                 
     def on_database_preview_scroll( self, event ):
         """Handle mouse wheel scrolling over database preview image with debouncing"""
+        # Only process scroll if the application has focus
+        if not self.root.focus_displayof():
+            return
+            
         if not self.current_database_path or not hasattr( self, 'virtual_image_list' ):
             return
         
@@ -2510,10 +2546,16 @@ class ImageViewer:
         self.fullscreen_window.bind( "<Key-8>", lambda e: self.rate_current_fullscreen_image( 8 ) )
         self.fullscreen_window.bind( "<Key-9>", lambda e: self.rate_current_fullscreen_image( 9 ) )
         self.fullscreen_window.bind( "<Key-0>", lambda e: self.rate_current_fullscreen_image( 10 ) )
+        self.fullscreen_window.bind( "<Key-a>", lambda e: self.rate_current_fullscreen_image( 2 ) )
+        self.fullscreen_window.bind( "<Key-s>", lambda e: self.rate_current_fullscreen_image( 5 ) )
+        self.fullscreen_window.bind( "<Key-d>", lambda e: self.rate_current_fullscreen_image( 8 ) )
         
         # Use Ctrl+Left/Right for rating adjustment in fullscreen to avoid conflict with navigation
         self.fullscreen_window.bind( "<Control-Key-Left>", lambda e: self.adjust_current_fullscreen_rating( -1 ) )
         self.fullscreen_window.bind( "<Control-Key-Right>", lambda e: self.adjust_current_fullscreen_rating( 1 ) )
+        
+        # Add delete key binding for fullscreen
+        self.fullscreen_window.bind( "<Delete>", lambda e: self.delete_current_fullscreen_image() )
         
         self.fullscreen_window.focus_set()
         
@@ -3580,6 +3622,185 @@ class ImageViewer:
         """Show error from duplicate deletion"""
         progress_window.destroy()
         messagebox.showerror( "Error", f"Failed to remove duplicates: {error_msg}" )
+    
+    def clean_up_database( self ):
+        """Scan database and remove entries for files that no longer exist"""
+        if not self.current_database_path:
+            messagebox.showwarning( "Warning", "No database is currently open" )
+            return
+        
+        try:
+            # Create progress dialog
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Scanning for Missing Files" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            progress_window.resizable( False, False )
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100) )
+            
+            # Progress widgets
+            progress_label = ttk.Label( progress_window, text="Scanning database for missing files..." )
+            progress_label.pack( pady=10 )
+            
+            progress_bar = ttk.Progressbar( progress_window, mode='indeterminate' )
+            progress_bar.pack( padx=20, pady=10, fill=tk.X )
+            progress_bar.start()
+            
+            status_label = ttk.Label( progress_window, text="Please wait..." )
+            status_label.pack( pady=5 )
+            
+            # Process in background thread
+            import threading
+            
+            def scan_missing_files():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    # Get all images from database
+                    cursor.execute( "SELECT id, relative_path FROM images" )
+                    all_images = cursor.fetchall()
+                    
+                    # Check which files don't exist
+                    missing_files = []
+                    db_directory = os.path.dirname( self.current_database_path )
+                    
+                    for image_id, relative_path in all_images:
+                        full_path = os.path.join( db_directory, relative_path )
+                        if not os.path.exists( full_path ):
+                            missing_files.append( (image_id, relative_path) )
+                    
+                    conn.close()
+                    
+                    # Update UI on main thread
+                    self.root.after( 0, lambda: self.show_cleanup_results( progress_window, missing_files ) )
+                    
+                except Exception as e:
+                    # Show error on main thread
+                    self.root.after( 0, lambda: self.show_cleanup_error( progress_window, str(e) ) )
+            
+            # Start scanning
+            thread = threading.Thread( target=scan_missing_files, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to start cleanup scan: {str(e)}" )
+    
+    def show_cleanup_results( self, progress_window, missing_files ):
+        """Show the results of the cleanup scan"""
+        try:
+            progress_window.destroy()
+            
+            if not missing_files:
+                messagebox.showinfo( "No Missing Files", "All database entries have valid files." )
+                return
+            
+            # Show confirmation dialog
+            message = f"Found {len(missing_files)} database entries with missing files.\n\n"
+            message += "Do you want to remove these entries from the database?\n\n"
+            message += "No actual files will be deleted (they don't exist anymore)."
+            
+            if messagebox.askyesno( "Remove Missing Entries?", message ):
+                self.delete_missing_entries( missing_files )
+                
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to show cleanup results: {str(e)}" )
+    
+    def show_cleanup_error( self, progress_window, error_msg ):
+        """Show error from cleanup scan"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to scan for missing files: {error_msg}" )
+    
+    def delete_missing_entries( self, missing_files ):
+        """Delete the missing entries from the database"""
+        try:
+            # Create progress dialog for deletion
+            progress_window = tk.Toplevel( self.root )
+            progress_window.title( "Removing Missing Entries" )
+            progress_window.geometry( "400x150" )
+            progress_window.transient( self.root )
+            progress_window.grab_set()
+            progress_window.resizable( False, False )
+            
+            # Center the progress window
+            progress_window.geometry( "+%d+%d" % (self.root.winfo_rootx() + 100, self.root.winfo_rooty() + 100) )
+            
+            # Progress widgets
+            progress_label = ttk.Label( progress_window, text="Removing missing entries..." )
+            progress_label.pack( pady=10 )
+            
+            progress_bar = ttk.Progressbar( progress_window, maximum=len(missing_files), value=0 )
+            progress_bar.pack( padx=20, pady=10, fill=tk.X )
+            
+            status_label = ttk.Label( progress_window, text="Processing..." )
+            status_label.pack( pady=5 )
+            
+            # Process deletion in background
+            import threading
+            
+            def delete_entries():
+                try:
+                    conn = sqlite3.connect( self.current_database_path )
+                    cursor = conn.cursor()
+                    
+                    total_deleted = 0
+                    
+                    for i, (image_id, relative_path) in enumerate( missing_files ):
+                        # Delete associated image_tags first (foreign key constraint)
+                        cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (image_id,) )
+                        
+                        # Delete the image entry
+                        cursor.execute( "DELETE FROM images WHERE id = ?", (image_id,) )
+                        
+                        total_deleted += 1
+                        
+                        # Update progress on main thread
+                        progress = i + 1
+                        self.root.after( 0, lambda p=progress, path=relative_path: self.update_cleanup_progress( 
+                            progress_bar, status_label, p, len(missing_files), path ) )
+                    
+                    conn.commit()
+                    conn.close()
+                    
+                    # Show completion on main thread
+                    self.root.after( 0, lambda: self.show_cleanup_complete( progress_window, total_deleted ) )
+                    
+                except Exception as e:
+                    # Show error on main thread
+                    self.root.after( 0, lambda: self.show_cleanup_deletion_error( progress_window, str(e) ) )
+            
+            # Start deletion
+            thread = threading.Thread( target=delete_entries, daemon=True )
+            thread.start()
+            
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to start missing entry removal: {str(e)}" )
+    
+    def update_cleanup_progress( self, progress_bar, status_label, current, total, current_path ):
+        """Update the cleanup progress display"""
+        progress_bar['value'] = current
+        status_label.configure( text=f"Processing {current}/{total}: {os.path.basename(current_path)}" )
+    
+    def show_cleanup_complete( self, progress_window, total_deleted ):
+        """Show completion of cleanup deletion"""
+        progress_window.destroy()
+        
+        message = f"Successfully removed {total_deleted} entries with missing files from the database.\n\n"
+        message += "The database view will now refresh."
+        
+        messagebox.showinfo( "Cleanup Complete", message )
+        
+        # Refresh the database view
+        self.refresh_database_view()
+        self.refresh_filtered_images()
+    
+    def show_cleanup_deletion_error( self, progress_window, error_msg ):
+        """Show error from cleanup deletion"""
+        progress_window.destroy()
+        messagebox.showerror( "Error", f"Failed to remove missing entries: {error_msg}" )
             
     def refresh_database_view( self ):
         """Refresh the database tab view"""
@@ -5839,6 +6060,37 @@ class ImageViewer:
         if self.current_database_path:
             self.refresh_filtered_images()
     
+    def on_confirm_delete_toggle( self ):
+        """Handle the Confirm Before Delete option toggle"""
+        # Save the setting
+        self.save_confirm_delete_setting()
+    
+    def save_confirm_delete_setting( self ):
+        """Save the confirm before delete setting to file"""
+        try:
+            settings = {}
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+            
+            settings['confirm_before_delete'] = self.confirm_before_delete.get()
+            
+            with open( self.settings_file, 'w' ) as f:
+                json.dump( settings, f, indent=2 )
+        except Exception as e:
+            print( f"Error saving confirm delete setting: {e}" )
+    
+    def load_confirm_delete_setting( self ):
+        """Load the confirm before delete setting from file"""
+        try:
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    if 'confirm_before_delete' in settings:
+                        self.confirm_before_delete.set( settings['confirm_before_delete'] )
+        except Exception as e:
+            print( f"Error loading confirm delete setting: {e}" )
+    
     def show_todo_list( self ):
         """Show the TODO list dialog"""
         # Create TODO dialog window
@@ -6702,6 +6954,178 @@ class ImageViewer:
         adjust_method()
         # Schedule next repeat
         self._rating_repeat_timer = self.root.after( 500, self._rating_repeat, adjust_method )
+    
+    # Delete functionality
+    def delete_current_browse_image( self ):
+        """Delete the currently displayed browse image"""
+        if not self.current_browse_image:
+            return
+        self._delete_image_by_path( self.current_browse_image, 'browse' )
+    
+    def delete_current_database_image( self ):
+        """Delete the currently displayed database image"""
+        if not self.current_database_image:
+            return
+        self._delete_image_by_path( self.current_database_image, 'database' )
+    
+    def delete_current_fullscreen_image( self ):
+        """Delete the currently displayed fullscreen image"""
+        if not self.fullscreen_images or self.fullscreen_index >= len( self.fullscreen_images ):
+            return
+        current_image = self.fullscreen_images[self.fullscreen_index]
+        self._delete_image_by_path( current_image, 'fullscreen' )
+    
+    def _delete_image_by_path( self, image_path, context ):
+        """Helper method to delete an image file and database entry"""
+        if not os.path.exists( image_path ):
+            messagebox.showerror( "Error", "Image file not found" )
+            return
+        
+        # Check if confirmation is needed
+        if self.confirm_before_delete.get():
+            filename = os.path.basename( image_path )
+            response = messagebox.askyesno( 
+                "Confirm Delete",
+                f"Are you sure you want to delete this image?\n\n{filename}\n\nThis action cannot be undone.",
+                icon='warning'
+            )
+            if not response:
+                return
+        
+        try:
+            # Delete from filesystem
+            os.remove( image_path )
+            
+            # Delete from database if database is open
+            if self.current_database_path:
+                conn = sqlite3.connect( self.current_database_path )
+                cursor = conn.cursor()
+                
+                relative_path = os.path.relpath( image_path, os.path.dirname( self.current_database_path ) )
+                filename = os.path.basename( image_path )
+                
+                # Find the image in the database
+                cursor.execute( "SELECT id FROM images WHERE filename = ? OR relative_path = ? ORDER BY id DESC", (filename, relative_path) )
+                result = cursor.fetchone()
+                
+                if result:
+                    image_id = result[0]
+                    # Delete associated tags first
+                    cursor.execute( "DELETE FROM image_tags WHERE image_id = ?", (image_id,) )
+                    # Delete the image entry
+                    cursor.execute( "DELETE FROM images WHERE id = ?", (image_id,) )
+                
+                conn.commit()
+                conn.close()
+                
+                # Invalidate cache entry
+                if image_path in self.image_metadata_cache:
+                    del self.image_metadata_cache[image_path]
+            
+            # Update UI based on context
+            if context == 'browse':
+                self._handle_browse_delete_ui_update()
+            elif context == 'database':
+                self._handle_database_delete_ui_update()
+            elif context == 'fullscreen':
+                self._handle_fullscreen_delete_ui_update()
+                
+        except PermissionError:
+            messagebox.showerror( "Error", "Permission denied. The file may be in use by another program." )
+        except Exception as e:
+            messagebox.showerror( "Error", f"Failed to delete image: {str(e)}" )
+    
+    def _handle_browse_delete_ui_update( self ):
+        """Handle UI update after deleting image in browse tab"""
+        # Store the current selection index before refresh
+        current_index = None
+        if hasattr( self, 'browse_file_listbox' ):
+            selection = self.browse_file_listbox.curselection()
+            if selection:
+                current_index = selection[0]
+        
+        # Refresh the directory to remove deleted file
+        if self.current_browse_directory:
+            self.refresh_browse_directory()
+            
+            # Try to show next image if available
+            if hasattr( self, 'browse_file_listbox' ) and self.browse_file_listbox.size() > 0:
+                # Select the next image (or previous if we were at the end)
+                if current_index is not None:
+                    # If current_index is beyond the new list size, select the last item
+                    new_index = min( current_index, self.browse_file_listbox.size() - 1 )
+                else:
+                    new_index = 0
+                
+                self.browse_file_listbox.selection_clear( 0, tk.END )
+                self.browse_file_listbox.selection_set( new_index )
+                self.browse_file_listbox.event_generate( "<<ListboxSelect>>" )
+                self.browse_file_listbox.see( new_index )
+            else:
+                # No more images, clear preview
+                self.current_browse_image = None
+                self.browse_preview_label.configure( image="", text="No image selected" )
+                self.browse_preview_label.image = None
+                self.browse_path_label.configure( text="" )
+    
+    def _handle_database_delete_ui_update( self ):
+        """Handle UI update after deleting image in database tab"""
+        # Store the current index before refresh
+        current_index = None
+        if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list.selected_indices:
+            current_index = list( self.virtual_image_list.selected_indices )[0]
+        
+        # Refresh the filtered images list to remove deleted file
+        if self.current_database_path:
+            self.refresh_filtered_images()
+            
+            # Try to show next image if available
+            if hasattr( self, 'virtual_image_list' ) and len( self.virtual_image_list.filtered_items ) > 0:
+                # Select the next image (or previous if we were at the end)
+                if current_index is not None:
+                    # If current_index is beyond the new list size, select the last item
+                    new_index = min( current_index, len( self.virtual_image_list.filtered_items ) - 1 )
+                else:
+                    new_index = 0
+                
+                if new_index >= 0:
+                    item_data = self.virtual_image_list.filtered_items[new_index]
+                    filepath = item_data.get( 'filepath' )
+                    if filepath and os.path.exists( filepath ):
+                        self.current_database_image = filepath
+                        self.selected_image_files = [filepath]
+                        self.display_image_preview( filepath, self.database_preview_label )
+                        self.load_image_tags_for_editing()
+                        
+                        # Update the virtual list selection
+                        self.virtual_image_list.selected_indices = {new_index}
+                        if hasattr( self.virtual_image_list, 'treeview' ):
+                            self.virtual_image_list.treeview.selection_set( str( new_index ) )
+                            self.virtual_image_list.treeview.see( str( new_index ) )
+            else:
+                # No more images, clear preview
+                self.current_database_image = None
+                self.selected_image_files = []
+                self.database_preview_label.configure( image="", text="No image selected" )
+                self.database_preview_label.image = None
+                self.database_path_label.configure( text="" )
+                self.clear_image_tag_interface()
+    
+    def _handle_fullscreen_delete_ui_update( self ):
+        """Handle UI update after deleting image in fullscreen mode"""
+        # Remove the deleted image from the list
+        deleted_image = self.fullscreen_images[self.fullscreen_index]
+        self.fullscreen_images.pop( self.fullscreen_index )
+        
+        # Update fullscreen display
+        if len( self.fullscreen_images ) == 0:
+            # No more images, exit fullscreen
+            self.exit_fullscreen_mode( None )
+        else:
+            # Show next image (or previous if we were at the end)
+            if self.fullscreen_index >= len( self.fullscreen_images ):
+                self.fullscreen_index = len( self.fullscreen_images ) - 1
+            self.display_fullscreen_image()
     
     # Quickmove functionality
     def on_quickmove_toggle( self ):
