@@ -333,6 +333,7 @@ class TreeviewImageList:
                 else:
                     self.treeview.selection_add( item )
                 self.last_clicked_index = index
+                return "break"  # Prevent default behavior
                 
             elif event.state & 0x1:  # Shift key
                 if hasattr( self, 'last_clicked_index' ) and self.last_clicked_index is not None:
@@ -345,13 +346,10 @@ class TreeviewImageList:
                 else:
                     self.treeview.selection_set( item )
                     self.last_clicked_index = index
+                return "break"  # Prevent default behavior
             else:
                 self.treeview.selection_set( item )
                 self.last_clicked_index = index
-                
-        # Don't manually trigger selection change - let the TreeviewSelect event handle it
-        # This prevents duplicate processing and potential hanging
-        pass
         
     def on_double_click( self, event ):
         """Handle double click events"""
@@ -1605,6 +1603,9 @@ class ImageViewer:
         # Set up callbacks for selection and double-click
         self.virtual_image_list.add_selection_callback( self.on_virtual_selection_changed )
         self.virtual_image_list.on_item_double_click = self.on_virtual_double_click
+        
+        # Bind quickmove key to the treeview so it works when focused on the list
+        self.virtual_image_list.treeview.bind( "<Key-q>", lambda e: self.quickmove_current_image() )
         
         # Compatibility attributes for existing code
         self.image_list_items = []  # Will be synced with virtual list
@@ -7161,7 +7162,7 @@ class ImageViewer:
             self.save_quickmove_settings()
     
     def quickmove_current_image( self ):
-        """Copy the current preview image to the Quickmove folder"""
+        """Copy the current preview image(s) to the Quickmove folder"""
         if not self.quickmove_enabled.get():
             return "break"
         
@@ -7170,9 +7171,31 @@ class ImageViewer:
             messagebox.showerror( "Quickmove Error", "Please select a valid destination folder." )
             return "break"
         
-        # Determine which image is currently being previewed
-        current_image = None
         current_tab = self.notebook.tab( self.notebook.select(), "text" )
+        
+        # Check if multiple images are selected in database tab
+        if current_tab == "Database":
+            selected_files = []
+            
+            # Get selected files from virtual image list
+            if hasattr( self, 'virtual_image_list' ) and self.virtual_image_list:
+                selected_indices = self.virtual_image_list.selected_indices
+                if selected_indices and len( selected_indices ) > 1:
+                    # Multiple items selected - get all filepaths
+                    for index in selected_indices:
+                        if index < len( self.virtual_image_list.filtered_items ):
+                            item_data = self.virtual_image_list.filtered_items[index]
+                            filepath = item_data.get( 'filepath' )
+                            if filepath and os.path.exists( filepath ):
+                                selected_files.append( filepath )
+                    
+                    if len( selected_files ) > 1:
+                        # Multiple valid files selected - copy all with confirmation
+                        self.quickmove_multiple_images_list( quickmove_folder, selected_files )
+                        return "break"
+        
+        # Single image - original behavior
+        current_image = None
         
         if current_tab == "Browse":
             current_image = self.current_browse_image
@@ -7203,6 +7226,70 @@ class ImageViewer:
             messagebox.showerror( "Quickmove Error", f"Failed to copy file:\n{str(e)}" )
         
         return "break"
+    
+    def quickmove_multiple_images_list( self, quickmove_folder, selected_files ):
+        """Copy multiple selected images to the Quickmove folder"""
+        num_images = len( selected_files )
+        
+        # Show confirmation dialog
+        response = messagebox.askyesno( 
+            "Quickmove Multiple Images",
+            f"Copy {num_images} selected images to:\n{quickmove_folder}\n\nContinue?",
+            icon='question'
+        )
+        
+        if not response:
+            return
+        
+        try:
+            copied_count = 0
+            overwritten_count = 0
+            error_count = 0
+            
+            for image_path in selected_files:
+                if not os.path.exists( image_path ):
+                    error_count += 1
+                    continue
+                
+                try:
+                    filename = os.path.basename( image_path )
+                    destination = os.path.join( quickmove_folder, filename )
+                    
+                    # Check if file already exists
+                    file_exists = os.path.exists( destination )
+                    
+                    # Copy the file (overwrite if exists)
+                    shutil.copy2( image_path, destination )
+                    
+                    if file_exists:
+                        overwritten_count += 1
+                    else:
+                        copied_count += 1
+                        
+                except Exception as e:
+                    print( f"Error copying {filename}: {e}" )
+                    error_count += 1
+            
+            # Show summary
+            message = f"Quickmove complete:\n\n"
+            message += f"• {copied_count} new files copied\n"
+            if overwritten_count > 0:
+                message += f"• {overwritten_count} files overwritten\n"
+            if error_count > 0:
+                message += f"• {error_count} files failed to copy\n"
+            
+            messagebox.showinfo( "Quickmove Complete", message )
+            
+            # Show indicator based on results
+            if error_count > 0:
+                self.show_quickmove_overwrite()  # Orange for partial success
+            elif overwritten_count > 0:
+                self.show_quickmove_overwrite()  # Orange for overwrites
+            else:
+                self.show_quickmove_success()    # Green for all new files
+                
+        except Exception as e:
+            messagebox.showerror( "Quickmove Error", f"Failed to copy files:\n{str(e)}" )
     
     def show_quickmove_success( self ):
         """Show green dot indicator for successful quickcopy"""
