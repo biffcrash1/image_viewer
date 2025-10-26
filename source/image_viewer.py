@@ -40,6 +40,7 @@ class TreeviewImageList:
         
         # Thumbnail support
         self._thumbnail_cache = {}
+        self._thumbnail_references = {}  # Keep references to prevent garbage collection
         self.thumbnail_load_queue = deque()
         self.thumbnail_loading = False
         self.max_cache_size = 500
@@ -134,6 +135,8 @@ class TreeviewImageList:
         
     def refresh_treeview( self ):
         """Refresh the treeview with current filtered items"""
+        # Clear thumbnail references before deleting items
+        self._thumbnail_references.clear()
         # Clear existing items
         for item in self.treeview.get_children():
             self.treeview.delete( item )
@@ -588,7 +591,8 @@ class TreeviewImageList:
                                 current_text = self.treeview.item( item_id, 'text' )
                                 # Set both image and text (image appears before text in treeview)
                                 self.treeview.item( item_id, image=photo, text=current_text )
-
+                                # Keep reference to prevent garbage collection
+                                self._thumbnail_references[item_id] = photo
                                 
                                 # Force treeview to refresh this item
                                 self.treeview.update_idletasks()
@@ -665,6 +669,8 @@ class TreeviewImageList:
                     
                 # Set the image for the treeview item
                 self.treeview.item( item_id, image=photo )
+                # Keep reference to prevent garbage collection
+                self._thumbnail_references[item_id] = photo
         except Exception as e:
             print( f"Error updating thumbnail for {item_id}: {e}" )
             
@@ -680,6 +686,8 @@ class TreeviewImageList:
         """Clear all thumbnails from display"""
         for item_id in self.treeview.get_children():
             self.treeview.item( item_id, image='' )
+        # Clear thumbnail references to free memory
+        self._thumbnail_references.clear()
             
     def load_visible_thumbnails( self ):
         """Load thumbnails for currently visible items only"""
@@ -949,7 +957,7 @@ class ImageViewer:
         self.fullscreen_paths_cache = {}  # Cache for resolved paths
         
         # Options settings
-        self.show_thumbnails = tk.BooleanVar( value=False )  # Default to no thumbnails
+        self.show_thumbnails = tk.BooleanVar( value=True )  # Default to show thumbnails
         self.confirm_before_delete = tk.BooleanVar( value=True )  # Default to confirm before delete
         self.thumbnail_cache = {}  # Cache for 64x64 thumbnails
         self.thumbnail_load_queue = []  # Queue of items waiting for thumbnail loading
@@ -1563,9 +1571,9 @@ class ImageViewer:
         
         # Ensure restoration happens when window is fully visible
         def delayed_restore():
-            self.root.after( 100, self.restore_paned_positions )
+            self.root.after( 200, self.restore_paned_positions )
         
-        self.root.after( 500, delayed_restore )
+        self.root.after( 800, delayed_restore )
         
         # Add resize handler to enforce minimum scrollable area heights and save positions
         def on_paned_configure( event ):
@@ -2069,16 +2077,30 @@ class ImageViewer:
         """Handle resize events for browse preview label"""
         # Only process resize events for the label itself, not child widgets
         if event.widget == self.browse_preview_label:
-            # If there's a current image, redisplay it with the new size
+            # Clear cached size to force recalculation
+            if hasattr( self.browse_preview_label, '_cached_size' ):
+                delattr( self.browse_preview_label, '_cached_size' )
+            # Clear the preview cache for this image so it gets regenerated at new size
             if hasattr( self.browse_preview_label, 'current_image_path' ) and self.browse_preview_label.current_image_path:
+                cache_key = f"{self.browse_preview_label.current_image_path}_{id(self.browse_preview_label)}"
+                if hasattr( self, '_preview_cache' ) and cache_key in self._preview_cache:
+                    del self._preview_cache[cache_key]
+                # Redisplay the image with the new size
                 self.display_image_preview( self.browse_preview_label.current_image_path, self.browse_preview_label )
                 
     def on_database_preview_resize( self, event ):
         """Handle resize events for database preview label"""
         # Only process resize events for the label itself, not child widgets
         if event.widget == self.database_preview_label:
-            # If there's a current image, redisplay it with the new size
+            # Clear cached size to force recalculation
+            if hasattr( self.database_preview_label, '_cached_size' ):
+                delattr( self.database_preview_label, '_cached_size' )
+            # Clear the preview cache for this image so it gets regenerated at new size
             if hasattr( self.database_preview_label, 'current_image_path' ) and self.database_preview_label.current_image_path:
+                cache_key = f"{self.database_preview_label.current_image_path}_{id(self.database_preview_label)}"
+                if hasattr( self, '_preview_cache' ) and cache_key in self._preview_cache:
+                    del self._preview_cache[cache_key]
+                # Redisplay the image with the new size
                 self.display_image_preview( self.database_preview_label.current_image_path, self.database_preview_label )
                 
     def on_database_preview_scroll( self, event ):
@@ -5735,6 +5757,32 @@ class ImageViewer:
         """Restore paned window positions from settings"""
         try:
             if not os.path.exists( self.settings_file ):
+                # Set default positions to 50% when no settings file exists
+                self.root.update_idletasks()  # Ensure geometry is updated
+                
+                # Set horizontal paned to 50% of its actual width
+                if hasattr( self, 'horizontal_paned' ):
+                    # Use the paned window's actual width, not the root window
+                    paned_width = self.horizontal_paned.winfo_width()
+                    if paned_width > 100:  # Only set if widget is properly sized
+                        default_horizontal_pos = paned_width // 2
+                        self.horizontal_paned.sashpos( 0, default_horizontal_pos )
+                    else:
+                        # Widget not sized yet, try again later
+                        self.root.after( 200, self.restore_paned_positions )
+                        return
+                
+                # Set vertical paned to 50% of its actual height
+                if hasattr( self, 'vertical_paned' ):
+                    # Use the paned window's actual height, not the root window
+                    paned_height = self.vertical_paned.winfo_height()
+                    if paned_height > 100:  # Only set if widget is properly sized
+                        default_vertical_pos = paned_height // 2
+                        self.vertical_paned.sashpos( 0, default_vertical_pos )
+                    else:
+                        # Widget not sized yet, try again later
+                        self.root.after( 200, self.restore_paned_positions )
+                        return
                 return
                 
             with open( self.settings_file, 'r' ) as f:
@@ -5998,11 +6046,12 @@ class ImageViewer:
     def restore_thumbnail_setting( self ):
         """Restore the thumbnail setting from saved settings"""
         try:
-            with open( self.settings_file, 'r' ) as f:
-                settings = json.load( f )
-                
-            show_thumbnails = settings.get( 'show_thumbnails', False )
-            self.show_thumbnails.set( show_thumbnails )
+            if os.path.exists( self.settings_file ):
+                with open( self.settings_file, 'r' ) as f:
+                    settings = json.load( f )
+                    
+                show_thumbnails = settings.get( 'show_thumbnails', False )
+                self.show_thumbnails.set( show_thumbnails )
                     
         except Exception as e:
             print( f"Error restoring thumbnail setting: {e}" )
