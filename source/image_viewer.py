@@ -2375,12 +2375,6 @@ class ImageViewer:
 
     def display_image_preview( self, filepath, label_widget ):
         """Display image preview in the specified label widget with caching"""
-        # Update the corresponding file path label
-        if label_widget == self.browse_preview_label:
-            self.browse_path_label.configure( text=filepath )
-        elif label_widget == self.database_preview_label:
-            self.database_path_label.configure( text=filepath )
-        
         # Check cache first for fast display
         cache_key = f"{filepath}_{id(label_widget)}"
         if hasattr( self, '_preview_cache' ) and cache_key in self._preview_cache:
@@ -2388,6 +2382,13 @@ class ImageViewer:
             label_widget.configure( image=cached_photo, text="" )
             label_widget.image = cached_photo
             label_widget.current_image_path = filepath
+            # Update path label with cached resolution if available
+            if hasattr( cached_photo, '_image_resolution' ):
+                res_text = f"{filepath} - {cached_photo._image_resolution}"
+                if label_widget == self.browse_preview_label:
+                    self.browse_path_label.configure( text=res_text )
+                elif label_widget == self.database_preview_label:
+                    self.database_path_label.configure( text=res_text )
             return
             
         try:
@@ -2395,6 +2396,13 @@ class ImageViewer:
             with Image.open( filepath ) as image:
                 # Get original size
                 original_width, original_height = image.size
+                
+                # Update the path label with resolution
+                resolution_text = f"{filepath} - {original_width}x{original_height}"
+                if label_widget == self.browse_preview_label:
+                    self.browse_path_label.configure( text=resolution_text )
+                elif label_widget == self.database_preview_label:
+                    self.database_path_label.configure( text=resolution_text )
                 
                 # Skip very large images by loading a smaller version first
                 if original_width > 2000 or original_height > 2000:
@@ -2439,6 +2447,9 @@ class ImageViewer:
                 resized_image = image.resize( (new_width, new_height), resample_method )
                 
                 photo = ImageTk.PhotoImage( resized_image )
+                
+                # Store original resolution for display
+                photo._image_resolution = f"{original_width}x{original_height}"
                 
                 # Cache the result
                 if not hasattr( self, '_preview_cache' ):
@@ -3405,10 +3416,10 @@ class ImageViewer:
                             except Exception as e:
                                 print( f"Error processing {filepath}: {e}" )
                                 
-            # Batch insert new images (or replace if duplicate relative_path exists)
+            # Batch insert new images (ignore if duplicate relative_path exists to preserve ratings)
             if new_images_batch:
                 cursor.executemany( '''
-                    INSERT OR REPLACE INTO images (filename, relative_path, width, height)
+                    INSERT OR IGNORE INTO images (filename, relative_path, width, height)
                     VALUES (?, ?, ?, ?)
                 ''', new_images_batch )
                                 
