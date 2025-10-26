@@ -8,14 +8,14 @@ import os
 from pathlib import Path
 
 def apply_performance_patches():
-    """Apply performance optimizations to main.py"""
+    """Apply performance optimizations to image_viewer.py"""
     
     # Read the original file
-    with open( 'main.py', 'r', encoding='utf-8' ) as f:
+    with open( 'image_viewer.py', 'r', encoding='utf-8' ) as f:
         content = f.read()
     
     # Create backup
-    backup_path = 'main.py.backup'
+    backup_path = 'image_viewer.py.backup'
     if not os.path.exists( backup_path ):
         with open( backup_path, 'w', encoding='utf-8' ) as f:
             f.write( content )
@@ -233,9 +233,9 @@ import weakref'''
     
     # Write modified content
     if patches_applied > 0:
-        with open( 'main.py', 'w', encoding='utf-8' ) as f:
+        with open( 'image_viewer.py', 'w', encoding='utf-8' ) as f:
             f.write( modified_content )
-        print( f"\nApplied {patches_applied} performance patches to main.py" )
+        print( f"\nApplied {patches_applied} performance patches to image_viewer.py" )
         print( "Performance improvements include:" )
         print( "- Database indexing for faster queries" )
         print( "- Query result caching" )

@@ -10,14 +10,14 @@ import os
 def apply_simple_performance_fixes():
     """Apply simple but effective performance fixes"""
     
-    print( "Applying simple performance fixes to main.py..." )
+    print( "Applying simple performance fixes to image_viewer.py..." )
     
     # Read the original file
-    with open( 'main.py', 'r', encoding='utf-8' ) as f:
+    with open( 'image_viewer.py', 'r', encoding='utf-8' ) as f:
         content = f.read()
     
     # Create backup if it doesn't exist
-    backup_path = 'main.py.performance_backup'
+    backup_path = 'image_viewer.py.performance_backup'
     if not os.path.exists( backup_path ):
         with open( backup_path, 'w', encoding='utf-8' ) as f:
             f.write( content )
@@ -116,7 +116,7 @@ def apply_simple_performance_fixes():
     
     # Write the modified content
     if modifications:
-        with open( 'main.py', 'w', encoding='utf-8' ) as f:
+        with open( 'image_viewer.py', 'w', encoding='utf-8' ) as f:
             f.write( content )
         
         print( f"\n✅ Applied {len(modifications)} performance fixes:" )

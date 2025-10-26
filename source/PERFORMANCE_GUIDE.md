@@ -9,7 +9,7 @@ This guide provides solutions to improve scrolling and filtering performance whe
 python simple_performance_fixes.py
 ```
 
-This script will automatically apply several performance improvements to your `main.py` file.
+This script will automatically apply several performance improvements to your `image_viewer.py` file.
 
 ## Performance Issues Identified
 
